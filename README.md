@@ -20,8 +20,30 @@ So, if you're a programmer like me, your answer is just a few SELECTs away.
 
 Or, you can do some cool data analysis with all this data.
 
-Use writedb.py to update the database to the latest race, or to start it from scratch (you need to run reset.py if you want to start it from scratch).
-Use reset.py to remove all the data from the database, or to initialise the database.
+
+
+## Download the latest version:
+To download the latest version of the database, please visit this link: [https://drive.google.com/file/d/1M3ijJIWDEGqGOw4Prx2AXFhts2cv-J1d/view](https://drive.google.com/file/d/1M3ijJIWDEGqGOw4Prx2AXFhts2cv-J1d/view)
+
+
+OR
+
+```bash
+pip install gdown 
+python download_db.py
+```
+
+## Update the database:
+If you want to update the database, all you need to do is run this command:
+```bash
+python writedb.py
+```
+
+## Reset/initialise the database:
+If, for whatever reason, you want to wipe out all the data in the database or you want to create the database with all the tables and columns, run this command:
+```bash
+python reset.py
+```
 
 ## Known errors
 - Practice times for everyone who is not the leader is just the gap.
