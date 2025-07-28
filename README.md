@@ -49,6 +49,7 @@ python reset.py
 - Practice times for everyone who is not the leader is just the gap.
 - GrandSlams is not working
 - Take the stats in the subtables with a pinch of salt, isn't always accurate.
+- For some reason, it doesn't have Lotus' 1963 and 1965 championships saved to database
 
 
 **Last updated race in sessionresults.db here: 2025 British Grand Prix**
