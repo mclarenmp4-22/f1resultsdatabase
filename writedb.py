@@ -1908,6 +1908,8 @@ def parse_championship_results (year, drivermap):
     headercells = drivers_table.find_all('tr')[0].find_all('td')
     for row in driversrows:
         cells = row.find_all('td')
+        if cells[0].get('colspan')== '27':
+            continue
         driverindo = {
             'position': int(cells[0].text.strip().replace('.', '')) if cells[0].get_text(strip=True).replace('.', '').isdigit() else driverschampionship[-1]["position"],
             'driver': drivermap[cells[1].text.strip()]
@@ -1952,6 +1954,8 @@ def parse_championship_results (year, drivermap):
         headercells = constructors_table.find_all('tr')[0].find_all('td')  # Get headers from first row
         for row in constructorsrows:
             cells = row.find_all('td')
+            if cells[0].get('colspan') == '27':
+                continue
             constructorindo = {
                 'position': int(cells[0].text.strip().replace('.', '')) if cells[0].get_text(strip=True).replace('.', '').isdigit() else constructorschampionship[-1]["position"],
                 'constructor': cells[1].find_all('a')[0].text.strip(),
@@ -2116,6 +2120,8 @@ for season in seasons[index:]:
     tablerows = driverschampionshiptable.find_all('tr')
     drivernames = []
     for row in tablerows[1:]:
+        if len(row.find_all("td")) ==  1:
+            continue
         cells = row.find_all("td")
         drivernames.append(cells[1].text.strip())  
     points_system_drivers, points_system_constructors = parse_points_system(str(soup))
@@ -2154,7 +2160,7 @@ for season in seasons[index:]:
         regulations = parse_regulations(str(reg)) if reg else None
         #print("Regulations:", regulations)
         print ("Regulations Parsed") 
-    cur.execute("""INSERT INTO Seasons (Season, DriversRacesCounted, PointsSharedForSharedCars, GrandPrixPointsSystemDrivers, SprintPointsSystemDrivers,
+    cur.execute("""INSERT OR IGNORE INTO Seasons (Season, DriversRacesCounted, PointsSharedForSharedCars, GrandPrixPointsSystemDrivers, SprintPointsSystemDrivers,
                 ConstructorsRacesCounted, PointsOnlyForTopScoringCar, GrandPrixPointsSystemConstructors, SprintPointsSystemConstructors,
                 RegulationNotes, MinimumWeightofCars, EngineType, Supercharging, MaxCylinderCapacity, NumberOfCylinders, MaxRPM, NumberOfEnginesAllowedPerSeason,
                 FuelType, RefuellingAllowed, MaxFuelConsumption) 
@@ -2366,19 +2372,64 @@ for season in seasons[index:]:
             cur.execute("UPDATE Engines SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, engine_id))
             cur.execute("UPDATE EngineModels SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, engine_model_id))
             cur.execute("UPDATE Tyres SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, tyre_id))
-        print ("Results saved to database")               
+        print ("Results saved to database")   
+        '''        
         for drivername in drivernames:
-            parts = drivername.lower().replace('.', '').split()
-            if len(parts) >= 2:
-                first_initial = parts[0][0]
-                last_name = ' '.join(parts[1:])  # handles multi-word last names like 'de graffenried'
-                for entrant in results:
-                    full = entrant["driver"].lower()
-                    if full.startswith(first_initial) and full.endswith(last_name):
-                        try:
-                            _ = name_map[drivername]
-                        except KeyError:
+            fulfilled = False
+            while fulfilled == False:
+                parts = drivername.lower().replace('.', '').split()
+                if len(parts) >= 2:
+                    first_initial = parts[0][0]
+                    last_name = ' '.join(parts[1:])  # handles multi-word last names like 'de graffenried'
+                    for entrant in results:
+                        full = entrant["driver"].lower()
+                        if full.startswith(first_initial) and full.endswith(last_name):
+                            try:
+                                _ = name_map[drivername]
+                            except KeyError:
+                                name_map[drivername] = entrant['driver']
+                        fulfilled = True
+                    if fulfilled == False:
+                        cur.execute("SELECT Driver FROM DriversChampionship WHERE Season = ?", (year,))
+                        rows = cur.fetchall()
+                        for row in rows:
+                            #use same matching logic as above
+                            full = row[0].lower()
+                            if full.startswith(first_initial) and full.endswith(last_name):
+                                try:
+                                    _ = name_map[drivername]
+                                except KeyError:
+                                    name_map[drivername] = row[0]
+                        fulfilled = True
+            '''
+        for drivername in drivernames:
+            fulfilled = False
+            while not fulfilled:
+                parts = drivername.lower().replace('.', '').split()
+                if len(parts) >= 2:
+                    first_initial = parts[0][0]
+                    last_name = ' '.join(parts[1:])
+                    # Try to match in results
+                    for entrant in results:
+                        full = entrant["driver"].lower()
+                        if full.startswith(first_initial) and full.endswith(last_name):
                             name_map[drivername] = entrant['driver']
+                            fulfilled = True
+                            break
+                    # If not found, try to match in DB
+                    if not fulfilled:
+                        cur.execute("SELECT Driver FROM DriversChampionship WHERE Season = ?", (year,))
+                        rows = cur.fetchall()
+                        for row in rows:
+                            full = row[0].lower()
+                            if full.startswith(first_initial) and full.endswith(last_name):
+                                name_map[drivername] = row[0]
+                                fulfilled = True
+                                break
+                    # If still not found, log and break to avoid infinite loop
+                    if not fulfilled:
+                        print(f"Could not resolve driver: {drivername}")
+                        fulfilled = True        
         #print (results)
         for item in grandprixlinks[6:]:
             if item['href'].endswith("/tour-par-tour.aspx"):
@@ -2490,7 +2541,15 @@ for season in seasons[index:]:
             #print (championship)
             print ("Championship results Parsed")
             for driver in driverschampionship:
-                driver_id = driverids[driver['driver']]
+                try:
+                    driver_id = driverids[driver['driver']]
+                except KeyError:
+                    cur.execute("SELECT ID FROM Drivers WHERE Name = ?", (driver['driver'],))
+                    row = cur.fetchone()
+                    if row:
+                        driver_id = row[0]
+                    else:
+                        raise ValueError(f"Driver ID not found for {driver['driver']}")                
                 cur.execute("""
                 INSERT OR REPLACE INTO DriversChampionship (ID, Season, Position, Driver, Points, OutOf, RaceByRace, DriverID)
                 VALUES (?,?,?,?,?,?,?,?)
