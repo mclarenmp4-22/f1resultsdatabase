@@ -1,6 +1,6 @@
 import sqlite3
 
-conn = sqlite3.connect("py/sessionresults.db")
+conn = sqlite3.connect("sessionresults.db")
 cursor = conn.cursor()
 
 tables = [
