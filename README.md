@@ -49,7 +49,6 @@ python reset.py
 - Practice times for everyone who is not the leader is just the gap.
 - GrandSlams is not working
 - Take the stats in the subtables with a pinch of salt, isn't always accurate.
-- For some reason, it doesn't have Lotus' 1963 and 1965 championships saved to database. Some results in ConstructorsChampionship is not there. I am currently working on this...
 
 
 **Last updated race in sessionresults.db here: 2025 Hungarian Grand Prix**
@@ -467,7 +466,7 @@ python reset.py
 15. ### ConstructorsChampionship
     This table has the championship results for constructors for every year.  
     **Columns:**
-    - **ID**: Unique ID (year+constructor). _TEXT PRIMARY KEY_
+    - **ID**: Unique ID (year+constructor+engine). _TEXT PRIMARY KEY_
     - **Season**: Year. _INTEGER_
     - **Position**: Position in standings. _INTEGER_
     - **Constructor**: Constructor name. _TEXT_

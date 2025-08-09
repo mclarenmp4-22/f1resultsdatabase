@@ -2428,7 +2428,6 @@ for season in seasons[index:]:
                                 break
                     # If still not found, log and break to avoid infinite loop
                     if not fulfilled:
-                        print(f"Could not resolve driver: {drivername}")
                         fulfilled = True        
         #print (results)
         for item in grandprixlinks[6:]:
@@ -2557,13 +2556,29 @@ for season in seasons[index:]:
                 (str(year) + driver['driver'], year, driver['position'], driver['driver'], driver['points'], driver['outof'], json.dumps(driver['racebyrace']), driver_id))
             if constructorschampionship != []:
                 for constructor in constructorschampionship:
-                    constructor_id = constructorids[constructor['constructor']]
-                    engine_id = engineids[constructor['engine']]
+                    try:
+                        constructor_id = constructorids[constructor['constructor']]
+                    except KeyError:
+                        cur.execute("SELECT ID FROM Constructors WHERE ConstructorName = ?", (constructor['constructor'],))
+                        row = cur.fetchone()
+                        if row:
+                            constructor_id = row[0]
+                        else:
+                            raise ValueError(f"Constructor ID not found for {constructor['constructor']}")                    
+                    try:
+                        engine_id = engineids[constructor['engine']]
+                    except KeyError:
+                        cur.execute("SELECT ID FROM Engines WHERE EngineName = ?", (constructor['engine'],))
+                        row = cur.fetchone()
+                        if row:
+                            engine_id = row[0]
+                        else:
+                            raise ValueError(f"Engine not found in DB: {constructor['engine']}")
                     cur.execute("""
                     INSERT OR REPLACE INTO ConstructorsChampionship (ID, Season, Position, Constructor, Engine, Points, OutOf, RaceByRace, ConstructorID, EngineID)
                     VALUES (?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (str(year) + constructor['constructor'], year, constructor['position'], constructor['constructor'], constructor['engine'], constructor['points'], constructor['outof'], json.dumps(constructor['racebyrace']), constructor_id, engine_id))
+                    (str(year) + constructor['constructor'] + constructor['engine'], year, constructor['position'], constructor['constructor'], constructor['engine'], constructor['points'], constructor['outof'], json.dumps(constructor['racebyrace']), constructor_id, engine_id))
             print ("Championship results saved to database")
     conn.commit()
 
