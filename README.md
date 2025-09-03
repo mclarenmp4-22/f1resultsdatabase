@@ -51,7 +51,7 @@ python reset.py
 - Take the stats in the subtables with a pinch of salt, isn't always accurate.
 
 
-**Last updated race in sessionresults.db here: 2025 Hungarian Grand Prix**
+**Last updated race in sessionresults.db here: 2025 Dutch Grand Prix**
 
 
 ## Tables
