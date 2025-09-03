@@ -32,10 +32,12 @@ OR
 pip install gdown 
 python download_db.py
 ```
+**Last updated: 2025 Dutch Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
 ```bash
+pip install beautifulsoup4
 python writedb.py
 ```
 
@@ -51,7 +53,6 @@ python reset.py
 - Take the stats in the subtables with a pinch of salt, isn't always accurate.
 
 
-**Last updated race in sessionresults.db here: 2025 Dutch Grand Prix**
 
 
 ## Tables
