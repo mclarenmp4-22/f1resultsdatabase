@@ -7,7 +7,7 @@ import datetime
 import json
 import unicodedata
 
-conn = sqlite3.connect('py/sessionresults.db')
+conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
 
@@ -263,7 +263,7 @@ def parse_points_system(html_content):
         return drivers_info, {}
 
     return drivers_info, constructors_info
-'''
+
 
 
 def parse_points_system(html_content):
@@ -381,7 +381,168 @@ def parse_points_system(html_content):
         return drivers_info, {}
 
     return drivers_info, constructors_info
+'''
 
+
+def parse_points_system(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    drivers_info = {
+        "scores": "All Scores",
+        "pointssharedforsharedcars": False,
+        "grandprix": {},
+        "sprint": None
+    }
+
+    constructors_info = {
+        "scores": "All Scores",
+        "topscoring": False,
+        "grandprix": {},
+        "sprint": None
+    }
+
+    drivers_found = False
+    constructors_found = False
+
+    for section in soup.find_all('div', class_='aligncenter'):
+        table = section.find('table', class_='bareme')
+        if not table:
+            continue
+
+        rows = table.find_all('tr')
+        full_text = section.get_text(separator=' ').lower()
+
+        # -------- DRIVERS --------
+        if not drivers_found and not constructors_found:
+            drivers_found = True
+
+            # Get all score-related lines before the table
+            score_lines = []
+            for elem in section.contents:
+                if getattr(elem, 'name', None) == 'table':
+                    break
+                if isinstance(elem, str):
+                    line = elem.strip()
+                    if "score" in line.lower():
+                        score_lines.append(line)
+            drivers_info["scores"] = "\n".join(score_lines) if score_lines else "All Scores"
+
+            if "points shared for shared drives" in full_text:
+                drivers_info["pointssharedforsharedcars"] = True
+
+            if len(rows) == 2:
+                # Use header row to determine keys
+                header_cells = [cell.get_text(strip=True) for cell in rows[0].find_all('td')[1:]]
+                point_cells = rows[1].find_all('td')[1:]
+                for header, cell in zip(header_cells, point_cells):
+                    header_clean = re.sub(r'\s*\d+(st|nd|rd|th)?\.?$', '', header, flags=re.IGNORECASE)
+                    value = cell.get_text(strip=True).replace("*", "")
+                    # Use header as key, or map to integer if it's a position
+                    if header_clean.lower().startswith('fastest'):
+                        if "(* only by finishing in the top ten)" or "(* only by finishing in the top 10)" in full_text:
+                            key = "Fastest Lap (only for finishing in the top 10)"
+                        else:
+                            key = "Fastest Lap"
+                        drivers_info["grandprix"][key] = value
+                    else:
+                        # Try to extract the position number
+                        match = re.match(r'(\d+)', header)
+                        key = match.group(1) if match else header
+                    drivers_info["grandprix"][key] = int(value) if value.isdigit() else 0
+
+            if len(rows) >= 3:
+                # Use header row to determine keys
+                header_cells = [cell.get_text(strip=True) for cell in rows[0].find_all('td')[1:]]
+                point_cells = rows[1].find_all('td')[2:]
+                for header, cell in zip(header_cells, point_cells):
+                    header_clean = re.sub(r'\s*\d+(st|nd|rd|th)?\.?$', '', header, flags=re.IGNORECASE)
+                    value = cell.get_text(strip=True).replace("*", "")
+                    # Use header as key, or map to integer if it's a position
+                    if header_clean.lower().startswith('fastest'):
+                        if "(* only by finishing in the top ten)" or "(* only by finishing in the top 10)" in full_text:
+                            key = "Fastest Lap (only for finishing in the top 10)"
+                        else:
+                            key = "Fastest Lap"
+                        drivers_info["grandprix"][key] = value
+                    else:
+                        # Try to extract the position number
+                        match = re.match(r'(\d+)', header)
+                        key = match.group(1) if match else header
+                    drivers_info["grandprix"][key] = int(value) if value.isdigit() else 0                
+                drivers_info["sprint"] = {}
+                for i, cell in enumerate(rows[2].find_all('td')[2:], start=1):
+                    value = cell.get_text(strip=True)
+                    if value != "":
+                        drivers_info["sprint"][str(i)] = int(value) if value.isdigit() else 0
+
+        # -------- CONSTRUCTORS --------
+        elif not constructors_found and drivers_found:
+            constructors_found = True
+
+            constructor_score_lines = []
+            for elem in section.contents:
+                if getattr(elem, 'name', None) == 'table':
+                    break
+                if isinstance(elem, str):
+                    line = elem.strip()
+                    if "score" in line.lower():
+                        constructor_score_lines.append(line)
+            constructors_info["scores"] = "\n".join(constructor_score_lines) if constructor_score_lines else "All Scores"
+
+            if "point only for highest placed car" in full_text:
+                constructors_info["topscoring"] = True
+
+            if len(rows) == 2:
+                # Use header row to determine keys (skip only the first column for constructors)
+                header_cells = [cell.get_text(strip=True) for cell in rows[0].find_all('td')[1:]]
+                point_cells = rows[1].find_all('td')[1:]
+                for header, cell in zip(header_cells, point_cells):
+                    header_clean = re.sub(r'\s*\d+(st|nd|rd|th)?\.?$', '', header, flags=re.IGNORECASE)
+                    value = cell.get_text(strip=True).replace("*", "")
+                    if header_clean.lower().startswith('fastest'):
+                        if "(* only by finishing in the top ten)" or "(* only by finishing in the top 10)" in full_text:
+                            key = "Fastest Lap (only for finishing in the top 10)"
+                        else:
+                            key = "Fastest Lap"
+                        drivers_info["grandprix"][key] = value
+                    else:
+                        match = re.match(r'(\d+)', header)
+                        key = match.group(1) if match else header
+                    constructors_info["grandprix"][key] = int(value) if value.isdigit() else 0
+
+            if len(rows) >= 3:
+                # Use header row to determine keys (skip only the first column for constructors)
+                header_cells = [cell.get_text(strip=True) for cell in rows[0].find_all('td')[1:]]
+                point_cells = rows[1].find_all('td')[2:]
+                for header, cell in zip(header_cells, point_cells):
+                    header_clean = re.sub(r'\s*\d+(st|nd|rd|th)?\.?$', '', header, flags=re.IGNORECASE)
+                    value = cell.get_text(strip=True).replace("*", "")
+                    if header_clean.lower().startswith('fastest'):
+                        if "(* only by finishing in the top ten)" or "(* only by finishing in the top 10)" in full_text:
+                            key = "Fastest Lap (only for finishing in the top 10)"
+                        else:
+                            key = "Fastest Lap"
+                        drivers_info["grandprix"][key] = value
+                    else:
+                        match = re.match(r'(\d+)', header)
+                        key = match.group(1) if match else header
+                    constructors_info["grandprix"][key] = int(value) if value.isdigit() else 0                
+                constructors_info["sprint"] = {}
+                for i, cell in enumerate(rows[2].find_all('td')[1:], start=1):
+                    value = cell.get_text(strip=True)
+                    if value != "":
+                        constructors_info["sprint"][str(i)] = int(value) if value.isdigit() else 0
+
+    # Fallback if nothing found
+    if not drivers_found:
+        print("Drivers' points table not found.")
+        return None, None
+
+    if not constructors_found:
+        print("Constructors' points table not found.")
+        return drivers_info, {}
+
+    return drivers_info, constructors_info
 
 def extract_regulations_notes(span):
     """
@@ -2812,6 +2973,6 @@ conn.close()
 Yes, I know I commented out a lot of code which is not a line of code, but as of the 2024 British Grand Prix, this script has
 approximately 2.41 lines of code for every Grand Prix.
 
-And before you chide me for my very inefficient code, and some bad logic, I'm only 14, so, as long as it works, I don't care.
+Yes, this is very inefficient, but it works, I don't care. I don't want to rewrite it to make it more efficient.
 
 '''
