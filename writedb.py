@@ -2751,7 +2751,7 @@ print ("All seasons processed and saved to database. Updating subtables...")
 #We update the wins, podiums, poles, fastest laps, championships and all those stats to the drivers, constructors, and other tables
 cur.execute("UPDATE Drivers SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Drivers SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Drivers SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Drivers SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Drivers SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Drivers SET Championships = (SELECT COUNT(*) FROM DriversChampionship WHERE DriversChampionship.driverid = Drivers.ID AND DriversChampionship.Position = 1)")
 cur.execute("UPDATE Drivers SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID)")
@@ -2759,7 +2759,7 @@ cur.execute("UPDATE Drivers SET Starts = (SELECT COUNT(*) FROM GrandPrixResults 
 cur.execute("UPDATE Drivers SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID)")
 cur.execute("UPDATE Drivers SET DNFs = (SELECT IFNULL(COUNT(*), 0) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND racetime IS NOT NULL AND racetime LIKE '%(Did not finish)%')")
 cur.execute("UPDATE Drivers SET LapsLed = (SELECT COUNT(*) FROM LapByLap WHERE LapByLap.driverid = Drivers.ID AND position = 1)")
-cur.execute("UPDATE Drivers SET HatTricks = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND raceposition = 1 AND qualifyingposition = 1 AND fastestlap = 1)")
+cur.execute("UPDATE Drivers SET HatTricks = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND raceposition = 1 AND starting_grid_position = 1 AND fastestlap = 1)")
 cur.execute("UPDATE Drivers SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.starting_grid_position IS NOT NULL)")
 cur.execute("UPDATE Drivers SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.sprintstarting_grid_position IS NOT NULL)")
 cur.execute("UPDATE Drivers SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.qualifyingposition IS NOT NULL)")
@@ -2768,8 +2768,8 @@ cur.execute("UPDATE Drivers SET BestSprintPosition = (SELECT MIN(sprintposition)
 cur.execute("UPDATE Drivers SET BestChampionshipPosition = (SELECT MIN(Position) FROM DriversChampionship WHERE DriversChampionship.driverid = Drivers.ID AND DriversChampionship.Position IS NOT NULL)")
 print("Drivers stats updated.")
 
-from collections import defaultdict
-
+from collections import defaultdict, Counter
+'''
 def get_grand_slam_candidates(cur):
     # Fetch all lap-by-lap data
     cur.execute("SELECT GrandPrixID, Lap, DriverID, Position FROM LapByLap")
@@ -2798,7 +2798,7 @@ led_every_lap_set = get_grand_slam_candidates(cur)
 cur.execute("""
     SELECT driverid, grandprixID
     FROM GrandPrixResults
-    WHERE raceposition = 1 AND qualifyingposition = 1 AND fastestlap = 1
+    WHERE raceposition = 1 AND starting_grid_position = 1 AND fastestlap = 1
 """)
 possible_grandslams = cur.fetchall()
 
@@ -2813,6 +2813,56 @@ for driverID, raceID in possible_grandslams:
 for driverID, grand_slam_count in grand_slam_counter.items():
     cur.execute("UPDATE Drivers SET GrandSlams = ? WHERE ID = ?", (grand_slam_count, driverID))
 
+'''
+def get_grand_slam_candidates(cur):
+    # Fetch all lap-by-lap data where Type = 'grandprix' to exclude sprint races
+    cur.execute("SELECT GrandPrixID, Lap, DriverID, Position FROM LapByLap WHERE Type = 'grandprix'")
+    rows = cur.fetchall()
+
+    # Total laps per race
+    race_lap_counts = defaultdict(int)
+    # Laps led by driver in each race
+    driver_lap_leads = defaultdict(int)
+
+    for raceID, lapNumber, driverID, position in rows:
+        race_lap_counts[raceID] += 1
+        if position == 1:
+            driver_lap_leads[(driverID, raceID)] += 1
+
+    # Determine drivers who led every lap
+    led_every_lap_set = set()
+    for (driverID, raceID), laps_led in driver_lap_leads.items():
+        if laps_led == race_lap_counts[raceID]:
+            led_every_lap_set.add((driverID, raceID))
+
+    return led_every_lap_set
+
+led_every_lap_set = get_grand_slam_candidates(cur)
+
+# Get races where drivers achieved pole, win, and fastest lap
+cur.execute("""
+    SELECT driverid, grandprixID
+    FROM GrandPrixResults 
+    WHERE raceposition = 1 
+    AND starting_grid_position = 1 
+    AND fastestlap = 1
+    AND racetime NOT LIKE '%(Did not finish)%'
+    AND racetime NOT LIKE '%(Did not start)%'
+    AND racetime NOT LIKE '%(Disqualified)%'
+""")
+possible_grandslams = cur.fetchall()
+
+# Count grand slams per driver
+grand_slam_counter = Counter()
+
+for driverID, raceID in possible_grandslams:
+    if (driverID, raceID) in led_every_lap_set:
+        grand_slam_counter[driverID] += 1
+
+# Update the Drivers table
+for driverID, grand_slam_count in grand_slam_counter.items():
+    cur.execute("UPDATE Drivers SET GrandSlams = ? WHERE ID = ?", (grand_slam_count, driverID))
+
 
 
 
@@ -2820,7 +2870,7 @@ for driverID, grand_slam_count in grand_slam_counter.items():
 #constructors now:
 cur.execute("UPDATE Constructors SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Constructors SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Constructors SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Constructors SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Constructors SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Constructors SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.constructorid = Constructors.ID AND ConstructorsChampionship.Position = 1)")
 cur.execute("UPDATE Constructors SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID)")
@@ -2838,7 +2888,7 @@ print("Constructors stats updated.")
 #exact same thing for engines as constructors
 cur.execute("UPDATE Engines SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Engines SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Engines SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Engines SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Engines SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Engines SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.engineid = Engines.ID AND ConstructorsChampionship.Position = 1)")
 cur.execute("UPDATE Engines SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID)")
@@ -2855,7 +2905,7 @@ print("Engines stats updated.")
 #chassis now:
 cur.execute("UPDATE Chassis SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Chassis SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Chassis SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Chassis SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Chassis SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Chassis SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID  AND GrandPrixResults.racetime NOT LIKE '%(Did not start)%')")
 cur.execute("UPDATE Chassis SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID   AND GrandPrixResults.racetime NOT LIKE '%(Did not start)%')")
@@ -2871,7 +2921,7 @@ print("Chassis stats updated.")
 #engine models now:
 cur.execute("UPDATE EngineModels SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE EngineModels SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE EngineModels SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE EngineModels SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE EngineModels SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE EngineModels SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.enginemodelid = EngineModels.ID AND ConstructorsChampionship.Position = 1)")
 cur.execute("UPDATE EngineModels SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID)")
@@ -2888,7 +2938,7 @@ print("EngineModels stats updated.")
 #tyres now:
 cur.execute("UPDATE Tyres SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Tyres SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Tyres SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Tyres SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Tyres SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.fastestlap = 1)")      
 cur.execute("UPDATE Tyres SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID)")
 cur.execute("UPDATE Tyres SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID   AND GrandPrixResults.racetime NOT LIKE '%(Did not start)%')")
@@ -2904,7 +2954,7 @@ print("Tyres stats updated.")
 #teams too:
 cur.execute("UPDATE Teams SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Teams SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Teams SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Teams SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Teams SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Teams SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID)")
 cur.execute("UPDATE Teams SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID   AND GrandPrixResults.racetime NOT LIKE '%(Did not start)%')")
@@ -2920,7 +2970,7 @@ print("Teams stats updated.")
 #nationalities:
 cur.execute("UPDATE Nationalities SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.raceposition = 1)")
 cur.execute("UPDATE Nationalities SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.raceposition <= 3)")
-cur.execute("UPDATE Nationalities SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.qualifyingposition = 1)")
+cur.execute("UPDATE Nationalities SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.starting_grid_position = 1)")
 cur.execute("UPDATE Nationalities SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.fastestlap = 1)")
 cur.execute("UPDATE Nationalities SET Championships = (SELECT COUNT(*) FROM DriversChampionship WHERE DriversChampionship.nationalityid = Nationalities.ID AND DriversChampionship.Position = 1)")
 cur.execute("UPDATE Nationalities SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID)")

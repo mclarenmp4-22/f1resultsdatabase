@@ -32,7 +32,7 @@ OR
 pip install gdown 
 python download_db.py
 ```
-**Last updated: 2025 Italian Grand Prix**
+**Last updated: 2025 Azerbaijan Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -48,9 +48,7 @@ python reset.py
 ```
 
 ## Known errors
-- Practice times for everyone who is not the leader is just the gap.
 - GrandSlams is not working
-- Take the stats in the subtables with a pinch of salt, isn't always accurate.
 
 
 
@@ -130,10 +128,10 @@ python reset.py
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
-   - **HatTricks**: Number of hat tricks. _INTEGER_
-   - **GrandSlams**: Number of grand slams. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
+   - **HatTricks**: Number of hat tricks (pole + win + fastest lap). _INTEGER_
+   - **GrandSlams**: Number of grand slams (pole + win + fastest lap + led every lap). _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -157,10 +155,10 @@ python reset.py
    - **Podiums**: Number of podiums. _INTEGER_
    - **Poles**: Number of pole positions. _INTEGER_
    - **FastestLaps**: Number of fastest laps. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
    - **Points**: Total points. _REAL_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
@@ -183,8 +181,8 @@ python reset.py
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -209,8 +207,8 @@ python reset.py
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -233,8 +231,8 @@ python reset.py
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -260,8 +258,8 @@ python reset.py
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts. _INTEGER_
    - **Entries**: Number of entries. _INTEGER_
-   - **DNFs**: Number of DNFs. _INTEGER_
-   - **LapsLed**: Number of laps led. _INTEGER_
+   - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -288,8 +286,8 @@ python reset.py
     - **Points**: Total points. _REAL_
     - **Starts**: Number of starts. _INTEGER_
     - **Entries**: Number of entries. _INTEGER_
-    - **DNFs**: Number of DNFs. _INTEGER_
-    - **LapsLed**: Number of laps led. _INTEGER_
+    - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER_
+    - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
     - **BestGridPosition**: Best grid position. _INTEGER_
     - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
     - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
@@ -367,27 +365,27 @@ python reset.py
     - **sprint_qualifyingtime**: Sprint qualifying time. _TEXT_
     - **sprint_qualifyingtimeinseconds**: Sprint qualifying time in seconds. _REAL_
     - **warmupposition**: Warmup position. _INTEGER_
-    - **warmuptime**: Warmup time. _TEXT_
+    - **warmuptime**: Warmup time. It only shows the gap for those who are not the leader. _TEXT_
     - **warmupgap**: Warmup gap. _TEXT_
     - **warmuptimeinseconds**: Warmup time in seconds. _REAL_
     - **warmuplaps**: Warmup laps. _INTEGER_
     - **practice1position**: Practice 1 position. _INTEGER_
-    - **practice1time**: Practice 1 time. _TEXT_
+    - **practice1time**: Practice 1 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice1gap**: Practice 1 gap. _TEXT_
     - **practice1timeinseconds**: Practice 1 time in seconds. _REAL_
     - **practice1laps**: Practice 1 laps. _INTEGER_
     - **practice2position**: Practice 2 position. _INTEGER_
-    - **practice2time**: Practice 2 time. _TEXT_
+    - **practice2time**: Practice 2 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice2gap**: Practice 2 gap. _TEXT_
     - **practice2timeinseconds**: Practice 2 time in seconds. _REAL_
     - **practice2laps**: Practice 2 laps. _INTEGER_
     - **practice3position**: Practice 3 position. _INTEGER_
-    - **practice3time**: Practice 3 time. _TEXT_
+    - **practice3time**: Practice 3 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice3gap**: Practice 3 gap. _TEXT_
     - **practice3timeinseconds**: Practice 3 time in seconds. _REAL_
     - **practice3laps**: Practice 3 laps. _INTEGER_
     - **practice4position**: Practice 4 position. _INTEGER_
-    - **practice4time**: Practice 4 time. _TEXT_
+    - **practice4time**: Practice 4 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice4gap**: Practice 4 gap. _TEXT_
     - **practice4timeinseconds**: Practice 4 time in seconds. _REAL_
     - **practice4laps**: Practice 4 laps. _INTEGER_
@@ -519,8 +517,8 @@ python reset.py
     - **Points**: Total points. _REAL DEFAULT 0_
     - **Starts**: Number of starts. _INTEGER DEFAULT 0_
     - **Entries**: Number of entries. _INTEGER DEFAULT 0_
-    - **DNFs**: Number of DNFs. _INTEGER DEFAULT 0_
-    - **LapsLed**: Number of laps led. _INTEGER DEFAULT 0_
+    - **DNFs**: Number of DNFs. Only classified non-finishes are counted. _INTEGER DEFAULT 0_
+    - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER DEFAULT 0_
     - **BestGridPosition**: Best grid position. _INTEGER_
     - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
     - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
