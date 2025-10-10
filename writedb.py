@@ -30,6 +30,7 @@ def open_url(url):
     '''
 import socket
 def open_url(url, retries=3):
+    url = "https://" + url.replace("https://", "").replace("//", "/")
     req = urllib.request.Request(url, headers=headers)
     for attempt in range(retries):
         try:
@@ -37,7 +38,8 @@ def open_url(url, retries=3):
             global soup
             soup = BeautifulSoup(html, 'html.parser')
             return soup
-        except (urllib.error.URLError, socket.timeout, TimeoutError, Exception) as e:
+        except (Exception) as e:
+        #except (urllib.error.URLError, socket.timeout, TimeoutError, Exception) as e:
             print(f"Attempt {attempt + 1} failed for URL {url}: {e}")
             time.sleep(5)  # Wait 5 seconds before retrying
     raise RuntimeError(f"Failed to open URL {url} after {retries} attempts.")
@@ -1154,7 +1156,7 @@ def parse_race_results(links):
         elif link['href'].endswith('/qualifying/2'):
                 entrant['qualifying2laps'] = None
                 open_url(f"https://formula1.com{link['href']}")
-                table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+                table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
                 rows = table.find('tbody').find_all('tr')
                 first_qualifying_time = None
                 for row in rows:
@@ -1188,7 +1190,7 @@ def parse_race_results(links):
         elif link['href'].endswith('/qualifying/1'):
             open_url(f"https://formula1.com{link['href']}")
             #print (link['href'])
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             #print (table)
             rows = table.find('tbody').find_all('tr')
             first_qualifying_time = None
@@ -1221,7 +1223,7 @@ def parse_race_results(links):
                             break                          
         elif link['href'].endswith('/qualifying/0'):
                 open_url(f"https://formula1.com{link['href']}")
-                table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+                table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
                 rows = table.find('tbody').find_all('tr')
                 for row in rows:
                     cells = row.find_all('td')
@@ -1234,7 +1236,7 @@ def parse_race_results(links):
                                 break 
         elif link['href'].endswith('/qualifying'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             previousq1timeforthepreviousdriver = None
             previousq2timeforthepreviousdriver = None
@@ -1269,7 +1271,7 @@ def parse_race_results(links):
                             break
         elif link['href'].endswith('/sprint-qualifying'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             previousq1timeforthepreviousdriver = None
             previousq2timeforthepreviousdriver = None
@@ -1308,7 +1310,7 @@ def parse_race_results(links):
                             break                        
         elif link['href'].endswith('/practice/0'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
@@ -1341,7 +1343,7 @@ def parse_race_results(links):
                             break  
         elif link['href'].endswith('/practice/1'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
@@ -1373,7 +1375,7 @@ def parse_race_results(links):
 
         elif link['href'].endswith('/practice/2'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
@@ -1404,7 +1406,7 @@ def parse_race_results(links):
                             break  
         elif link['href'].endswith('/practice/3'):
             open_url(f"https://formula1.com{link['href']}")
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
@@ -1434,7 +1436,7 @@ def parse_race_results(links):
                             entrants[x] = entrant
                             break  
         elif link['href'].endswith('/practice/4'):
-            table = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            table = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
@@ -2642,7 +2644,7 @@ for season in seasons[index:]:
                                      
         if sxs:
             open_url(f"https://formula1.com{sxs}")
-            tablex = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+            tablex = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
             pitstopsummary = parse_pit_stop_summary(tablex, results) 
             print ("Pit stop summary Parsed") 
             for pitstop in pitstopsummary:
@@ -2691,7 +2693,7 @@ for season in seasons[index:]:
                     continue #There's no extra information on these pages, we skip them
                 else:
                     open_url(f"https://www.formula1.com{link['href']}")
-                    resulttable = soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
+                    resulttable = soup.find('table', class_ = 'Table-module_table__cKsW2')          #soup.find('table', class_ = 'f1-table f1-table-with-data w-full')
                     soup = BeautifulSoup(str(resulttable), 'html.parser')
                     #fi.write(soup.prettify())   
                     #print(soup.prettify())                                        
