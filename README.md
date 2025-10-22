@@ -36,7 +36,7 @@ OR
 pip install gdown 
 python download_db.py
 ```
-**Last updated: 2025 Singapore Grand Prix**
+**Last updated: 2025 United States Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
