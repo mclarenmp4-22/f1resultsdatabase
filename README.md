@@ -52,7 +52,7 @@ python reset.py
 ```
 
 ## Known errors
-- The column "GrandSlams" for the table "Drivers" is zero for every single driver.
+- The database prematurely gives a championship in the Championships column to the current championship leader, even if the season is not over.
 
 
 
@@ -603,8 +603,7 @@ python reset.py
 
       **Key**: It is the Grand Prix.
 
-      **Value**: In the form of an array. The 0th element has the number of points scored. The 1st element has the info whether the score was dropped(whether it did not count towards the championship). `true` means the score was dropped. `false` means the score was not dropped. `null` means the driver scored 0 points in that race.
-
+      **Value**: In the form of an array. The 0th element has the number of points scored. The 1st element has the info whether the score was dropped(whether it did not count towards the championship). `true` means the score was dropped. `false` means the score was not dropped. `null` means the driver scored 0 points in that race. If there is a `[null, null]`, it indicates that the driver did not take part in that race in the season, or the event is upcoming.
       For example, here's Alain Prost's `RaceByRace` during the 1988 season:
       ```
       {"Brazil": [9.0, false], "San Marino": [6.0, false], "Monaco": [9.0, false], "Mexico": [9.0, false], "Canada": [6.0, false], "Detroit": [6.0, false], "France": [9.0, false], "Britain": [0, null], "Germany": [6.0, false], "Hungary": [6.0, true], "Belgium": [6.0, true], "Italy": [0, null], "Portugal": [9.0, false], "Spain": [9.0, false], "Japan": [6.0, true], "Australia": [9.0, false]}

@@ -2815,7 +2815,7 @@ for driverID, raceID in possible_grandslams:
 for driverID, grand_slam_count in grand_slam_counter.items():
     cur.execute("UPDATE Drivers SET GrandSlams = ? WHERE ID = ?", (grand_slam_count, driverID))
 
-'''
+
 def get_grand_slam_candidates(cur):
     # Fetch all lap-by-lap data where Type = 'grandprix' to exclude sprint races
     cur.execute("SELECT GrandPrixID, Lap, DriverID, Position FROM LapByLap WHERE Type = 'grandprix'")
@@ -2839,6 +2839,31 @@ def get_grand_slam_candidates(cur):
 
     return led_every_lap_set
 
+
+'''
+def get_grand_slam_candidates(cur):
+    cur.execute("""
+        SELECT GrandPrixID, Lap, DriverID, Position
+        FROM LapByLap
+        WHERE Type = 'grandprix'
+    """)
+    rows = cur.fetchall()
+
+    # Track unique laps per race
+    race_laps = defaultdict(set)
+    driver_lap_leads = defaultdict(int)
+
+    for raceID, lapNumber, driverID, position in rows:
+        race_laps[raceID].add(lapNumber)
+        if position == 1:
+            driver_lap_leads[(driverID, raceID)] += 1
+
+    led_every_lap_set = set()
+    for (driverID, raceID), laps_led in driver_lap_leads.items():
+        if laps_led == len(race_laps[raceID]):
+            led_every_lap_set.add((driverID, raceID))
+
+    return led_every_lap_set
 led_every_lap_set = get_grand_slam_candidates(cur)
 
 # Get races where drivers achieved pole, win, and fastest lap
