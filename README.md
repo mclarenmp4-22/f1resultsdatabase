@@ -569,6 +569,11 @@ This will remove all races, results, and standings for that year while keeping t
     - **qualifyingtimeinseconds**: Qualifying time in seconds. _REAL_
     - **qualifyinggapseconds**: Qualifying gap in seconds. _REAL_
     - **qualifyinginterval**: Gap to the car ahead in qualifying. _REAL_
+    - **prequalifyingposition**: Pre-qualifying position. _INTEGER_
+    - **prequalifyingtime**: Pre-qualifying time. _TEXT_
+    - **prequalifyinggap**: Pre-qualifying gap. _TEXT_
+    - **prequalifyinginterval**: Gap to the car ahead in pre-qualifying. _REAL_
+    - **prequalifyingtimeinseconds**: Pre-qualifying time in seconds. _REAL_
     - **starting_grid_position**: Starting grid position. _INTEGER_
     - **gridpenalty**: Any grid penalty applied. It can be a pit lane start ("Start from pit lane"), start from the back of the grid ("Demoted to the back of the grid"), or a grid penalty by x number of postions (e.g, "Demoted by 7 places"). _TEXT_
     - **gridpenalty_reason**: Grid penalty reason (e.g "Modifying car under Parc Fermé conditions", "Exceeding quota of powertrain elements", and so on.). _TEXT_
