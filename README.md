@@ -52,6 +52,7 @@ pip install gdown
 python download_db.py
 ```
 **Last updated: 2025 Abu Dhabi Grand Prix**
+Note: The last available version available for download is still version 1 as some data is still not uploaded for the 2026 season. 
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -657,17 +658,17 @@ This will remove all races, results, and standings for that year while keeping t
     - **sprintgap**: Sprint gap. _TEXT_
     - **sprintgapinseconds**: Sprint gap in seconds. _REAL_
     - **sprintinterval**: Gap to the car ahead in the Sprint. _REAL_
-    - **sprintstatus**: Status of the car in the sprint (e.g. Did not finish, Disqualified, etc.). _TEXT_
+    - **sprintstatus**: Status of the car in the sprint (e.g. Did not finish, Disqualified, Classified, etc.). _TEXT_
     - **sprintstatusreason**: Reason for the status in the sprint (e.g. "Engine failure"). _TEXT_
     - **raceposition**: Race position. _INTEGER_
     - **racelaps**: Race laps. _INTEGER_
-    - **racetime**: Race time. If the car retired, did not start, got disqualified, or anything else, the reason for retirement is given. _TEXT_
+    - **racetime**: Race time.  _TEXT_
     - **racepoints**: Race points. _REAL_
     - **racetimeinseconds**: Race time in seconds. _REAL_
     - **racegap**: Race gap. _TEXT_
     - **racegapinseconds**: Race gap in seconds. _REAL_
     - **raceinterval**: Gap to the car ahead in the Race. _REAL_
-    - **racestatus**: Status of the car in the race (Did not finish, Disqualified, etc.). _TEXT_
+    - **racestatus**: Status of the car in the race (Did not finish, Disqualified, Classified, etc.). _TEXT_
     - **racestatusreason**: Reason for the status in the race (e.g, "Collision with car ahead"). _TEXT_
     - **penalties**: Penalties (JSON). _TEXT_
 
