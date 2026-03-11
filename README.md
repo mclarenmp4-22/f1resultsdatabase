@@ -4,7 +4,7 @@ If you're an F1 nerd like me, sometimes questions arise in your mind:
 
   - Both the Toyotas were on dry tyres at the end of the 2008 Brazilian Grand Prix, so how did Glock's lap times compare to Trulli's?
 
-  - What was the fastest and slowest lap times ever?
+  - What were the fastest and slowest lap times ever?
 
   - How many laps have been raced in Formula One history?
 
@@ -24,6 +24,21 @@ Or, you can do some cool data analysis with all this data.
 
 #### Note:
 This database has every single Grand Prix part of the _World Championship_. It does not contain non-Championship Grands Prix. When the word "Grand Prix" is used here, it refers to a World Championship Grand Prix. Similarly, when the word "Formula One", "F1", "Formula 1", or any of its variants have been used here, it refers to the _World Championship_, even though the 1952 and 1953 seasons were run to F2 regulations. The terms "Formula One", "Grand Prix", and "World Championship" are used synonymously.
+
+Formula 1 and related trademarks are the property of their respective owners. 
+
+This is the most comprehensive F1 database with:
+- **Every World Championship Grand Prix** result since 1950.
+- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times, tyre compounds, and stints from 2018 onwards.
+- **Full session coverage**: Complete results for Practice, Qualifying, Sprints, and Races.
+- **Accurate historical data**: Includes shared car results, pre-qualifying, and vintage scoring systems.
+- **Pit stop summary**: Includes pit stop data from 1983 onwards, including pit stop times from 2018 onwards.
+- **Technical Regulations**: Season-by-season rules on engines, weight, fuel, and more.
+- **Circuit Metadata**: coordinates and SVG layout paths for every circuit configuration in history.
+- **Comprehensive Penalties**: A full database of penalties with official reasons and serving types.
+- **In-Season Progress**: Track the championship standings race-by-race.
+- **Race Reports**: Narrative reports for every Grand Prix, from Wikipedia.
+
 
 
 ## Download the latest version:
@@ -51,9 +66,12 @@ If, for whatever reason, you want to wipe out all the data in the database or yo
 python reset.py
 ```
 
-## Known errors
-- The database prematurely gives a championship in the Championships column to the current championship leader, even if the season is not over.
-
+## Delete a specific season:
+If you want to delete data for a single season (e.g. to re-scrape it), run:
+```bash
+python py/deleteseason.py <year>
+```
+This will remove all races, results, and standings for that year while keeping the rest of the database intact.
 
 
 ## Tables
@@ -190,6 +208,7 @@ python reset.py
 
 2. ### Circuits
    This table contains all circuits which have hosted a Grand Prix.  
+   #### Note: If a circuit changes its name, it is counted as a different circuit.
    **Columns:**
    - **ID**: Unique circuit ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
    - **CircuitName**: Name of the circuit. _TEXT_
@@ -198,13 +217,32 @@ python reset.py
    - **GrandPrixCount**: Number of GPs held in that circuit. _INTEGER DEFAULT 0_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **Latitude**: GPS Latitude of the circuit. _REAL_
+   - **Longitude**: GPS Longitude of the circuit. _REAL_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-3. ### GrandsPrix
+3. ### CircuitLayouts
+   This table contains the different track configurations for each circuit used in Grand Prix history.
+   **Columns:**
+   - **ID**: Unique layout ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+   - **Latitude**: GPS Latitude. _REAL_
+   - **Longitude**: GPS Longitude. _REAL_
+   - **CircuitVersion**: Version number of the layout for the given location. _TEXT_
+   - **FirstGrandPrix**: Name of the first GP held on this layout. _TEXT_
+   - **LastGrandPrix**: Name of the last GP held on this layout. _TEXT_
+   - **GrandPrixCount**: Number of GPs held on this specific layout. _INTEGER DEFAULT 0_
+   - **GrandPrixDates**: JSON list of all race dates held on this layout. _TEXT_
+   - **SVG**: SVG path data for the track layout. _TEXT_
+   - **CircuitChanges**: Description of changes from the previous version. _TEXT_
+   - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+
+4. ### GrandsPrix
    This table contains all Grands Prix.  
    **Columns:**
    - **ID**: Unique Grand Prix ID. The ID corresponds to which Grand Prix it is from the start of the world championship; the Grand Prix with the ID 1000 will be the 1000th world championship Grand Prix (2019 Chinese Grand Prix). _INTEGER PRIMARY KEY_
    - **Season**: Year of the Grand Prix. _INTEGER_
-   - **GrandPrixName**: Name of the Grand Prix. _TEXT_
+   - **GrandPrixName**: Name of the Grand Prix. This does not refer to the Grand Prix's name alone, i.e. "Monaco Grand Prix". Instead, it refers to the full name of the Grand Prix, e.g. "2021 Monaco Grand Prix". This must be kept in mind for all tables that reference Grand Prix names. _TEXT_
    - **RoundNumber**: Round number in the season. For example, if a race was the seventeenth Grand Prix of the season, the value would be "17".  _INTEGER_
    - **CircuitName**: Name of the circuit. _TEXT_
    - **Date**: Date of the Grand Prix. For example, "Sunday, 2 August 2020" _TEXT_
@@ -214,6 +252,9 @@ python reset.py
    - **Weather**: Weather conditions. For example "Sunny", "Overcast", "Cloudy", "Night", "Rain", etc. _TEXT_
    - **Notes**: Notes about the race. _TEXT_
    - **SprintWeekend**: Whether it was a sprint weekend. _BOOLEAN_
+   - **CircuitLayoutID**: Foreign key to CircuitLayouts. _INTEGER_
+   - **PoleSide**: Side of the track the pole position is on. _TEXT_
+   - **GridFormation**: The formation of the starting grid (e.g. 2-2, 3-2-3). _TEXT_
 
    If it is a sprint weekend, the value is ```true```, if it is not, the value is ```false```.
    - **CircuitID**: Foreign key to Circuits. _INTEGER_
@@ -223,8 +264,28 @@ python reset.py
    - **RaceResultNotes**: Notes about the race result. _TEXT_
    - **SprintNotes**: Notes about the sprint. _TEXT_
    - **SprintGridNotes**: Notes about the sprint grid. _TEXT_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-4. ### Drivers
+5. ### Sessions
+   This table contains the schedule for every session (Practice, Qualifying, Sprint, Race) of a Grand Prix.
+   **Columns:**
+   - **ID**: Unique session ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+   - **GrandPrix**: Name of the Grand Prix. _TEXT_
+   - **SessionName**: Name of the session (e.g. "Practice 1", "Qualifying", "Race"). _TEXT_
+   - **SessionNumber**: Order of the session in the weekend. _INTEGER_
+   - **WasSessionCancelled**: Whether the session was cancelled. _BOOLEAN_
+   - **StartTimeTimestampUTC**: Start time UTC timestamp. _INTEGER_
+   - **EndTimeTimestampUTC**: End time UTC timestamp. _INTEGER_
+   - **StartTimeTimestamp**: Start time local timestamp. _INTEGER_
+   - **EndTimeTimestamp**: End time local timestamp. _INTEGER_
+   - **IfPreciseStartTime**: Whether the start time is precise. _BOOLEAN_
+   - **StartTimeinDatetimeUTC**: Start time in UTC datetime string. _TEXT_
+   - **EndTimeinDatetimeUTC**: End time in UTC datetime string. _TEXT_
+   - **StartTimeinDatetime**: Start time in local datetime string. _TEXT_
+   - **EndTimeinDatetime**: End time in local datetime string. _TEXT_
+   - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+
+6. ### Drivers
    This table contains all drivers who have entered a World Championship Grand Prix (this includes FP1 appearances and  third/substitute drivers).  
    **Columns:**
    - **ID**: Unique driver ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -235,12 +296,19 @@ python reset.py
    - **Podiums**: Number of podiums of that driver. _INTEGER_
    - **Poles**: Number of pole positions of that driver. _INTEGER_
    - **FastestLaps**: Number of fastest laps of that driver. _INTEGER_
+   - **SprintWins**: Number of sprint wins of that driver. _INTEGER_
+   - **SprintPodiums**: Number of sprint podiums of that driver. _INTEGER_
+   - **SprintPoles**: Number of sprint pole positions of that driver. _INTEGER_
+   - **SprintFastestLaps**: Number of sprint fastest laps of that driver. _INTEGER_
    - **Championships**: Number of championships of that driver. _INTEGER_
    - **Points**: Total points of that driver. _REAL_
    - **Starts**: Number of starts of that driver. _INTEGER_
    - **Entries**: Number of entries of that driver. _INTEGER_
+   - **SprintStarts**: Number of sprint starts of that driver. _INTEGER_
+   - **SprintEntries**: Number of sprint entries of that driver. _INTEGER_
    - **DNFs**: Number of DNFs of that driver. Only classified non-finishes are counted. For example, if a driver did not finish a race but has a classified finish in the race result, it is not counted here. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix) of that driver. _INTEGER_
+   - **GrandPrixLapsLed**: Number of grand prix laps led of that driver. _INTEGER_
+   - **SprintLapsLed**: Number of sprint laps led of that driver. _INTEGER_
    - **HatTricks**: Number of hat tricks (pole + win + fastest lap) of that driver. _INTEGER_
    - **GrandSlams**: Number of grand slams (pole + win + fastest lap + led every lap) of that driver. _INTEGER_
    - **BestGridPosition**: Best grid position of that driver. _INTEGER_
@@ -248,14 +316,16 @@ python reset.py
    - **BestQualifyingPosition**: Best qualifying position of that driver. _INTEGER_
    - **BestRacePosition**: Best race position of that driver. _INTEGER_
    - **BestSprintPosition**: Best sprint position of that driver. _INTEGER_
+   - **BestSprintQualifyingPosition**: Best sprint qualifying position of that driver. _INTEGER_
    - **BestChampionshipPosition**: Best championship position of that driver. _INTEGER_
    - **FirstGrandPrix**: First Grand Prix of that driver. _TEXT_
    - **LastGrandPrix**: Last Grand Prix of that driver. _TEXT_
    - **NationalityID**: Foreign key to Nationalities. _INTEGER_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-5. ### Teams
+7. ### Teams
    This table contains all teams that have entered a Grand Prix. A constructor and a team are two very different things. A constructor is an entity that constructs a chassis for Formula One, while a team can also include private entries from people who don't construct a chassis. In a more modern sense, a constructor is just the chassis name (i.e, Mercedes), while a team also includes the sponsor names (i.e, Mercedes AMG Petronas Formula One Team). The team names are according to the entry list for that race.
 
    **Columns:**
@@ -267,20 +337,29 @@ python reset.py
    - **Podiums**: Number of podiums of that team. _INTEGER_
    - **Poles**: Number of pole positions of that team. _INTEGER_
    - **FastestLaps**: Number of fastest laps of that team. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix) of that team. _INTEGER_
+   - **SprintWins**: Number of sprint wins of that team. _INTEGER_
+   - **SprintPodiums**: Number of sprint podiums of that team. _INTEGER_
+   - **SprintPoles**: Number of sprint pole positions of that team. _INTEGER_
+   - **SprintFastestLaps**: Number of sprint fastest laps of that team. _INTEGER_
    - **Starts**: Number of starts of that team. _INTEGER_
    - **Entries**: Number of entries of that team. _INTEGER_
-   - **DNFs**: Number of DNFs of that team. Only classified non-finishes are counted. _INTEGER_
+   - **SprintStarts**: Number of sprint starts of that team. _INTEGER_
+   - **SprintEntries**: Number of sprint entries of that team. _INTEGER_
+   - **DNFs**: Number of DNFs of that team. _INTEGER_
+   - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+   - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
    - **Points**: Total points. _REAL_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
    - **BestRacePosition**: Best race position. _INTEGER_
    - **BestSprintPosition**: Best sprint position. _INTEGER_
+   - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-6. ### Constructors
+8. ### Constructors
    This table contains all constructors who have made a chassis that entered a Grand Prix.  
    **Columns:**
    - **ID**: Unique constructor ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -289,24 +368,33 @@ python reset.py
    - **Podiums**: Number of podiums of that constructor. _INTEGER_
    - **Poles**: Number of pole positions of that constructor. _INTEGER_
    - **FastestLaps**: Number of fastest laps of that constructor. _INTEGER_
+   - **SprintWins**: Number of sprint wins. _INTEGER_
+   - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+   - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+   - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
    - **Championships**: Number of championships of that constructor. _INTEGER_
    - **Points**: Total points of that constructor. _REAL_
    - **Starts**: Number of starts of that constructor. _INTEGER_
    - **Entries**: Number of entries of that constructor. _INTEGER_
-   - **DNFs**: Number of DNFs of that constructor. Only classified non-finishes are counted. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix) of that constructor. _INTEGER_
+   - **SprintStarts**: Number of sprint starts. _INTEGER_
+   - **SprintEntries**: Number of sprint entries. _INTEGER_
+   - **DNFs**: Number of DNFs of that constructor. _INTEGER_
+   - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+   - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
    - **BestGridPosition**: Best grid position of that constructor. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position of that constructor. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position of that constructor. _INTEGER_
    - **BestRacePosition**: Best race position of that constructor. _INTEGER_
    - **BestSprintPosition**: Best sprint position of that constructor. _INTEGER_
+   - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
    - **BestChampionshipPosition**: Best championship position of that constructor. _INTEGER_
    - **FirstGrandPrix**: First Grand Prix of that constructor. _TEXT_
    - **LastGrandPrix**: Last Grand Prix of that constructor. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-7. ### Engines
+9. ### Engines
    This table contains all engine manufacturers to power an entry in a Grand Prix. Rebadged engines like Acer, Mecachrome, etc. are also included.
 
    **Columns:**
@@ -316,23 +404,32 @@ python reset.py
    - **Podiums**: Number of podiums of that engine manufacturer. _INTEGER_
    - **Poles**: Number of pole positions of that engine manufacturer. _INTEGER_
    - **FastestLaps**: Number of fastest laps of that engine manufacturer. _INTEGER_
+   - **SprintWins**: Number of sprint wins. _INTEGER_
+   - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+   - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+   - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
    - **Championships**: Number of championships of that engine manufacturer. _INTEGER_
-   - **Points**: Total points of that engine manufacturer. _REAL_
+   - **Points**: Total points. _REAL_
    - **Starts**: Number of starts of that engine manufacturer. _INTEGER_
    - **Entries**: Number of entries of that engine manufacturer. _INTEGER_
-   - **DNFs**: Number of DNFs of that engine manufacturer. Only classified non-finishes are counted. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix) of that engine manufacturer. _INTEGER_
-   - **BestGridPosition**: Best grid position of that engine manufacturer. _INTEGER_
-   - **BestSprintGridPosition**: Best sprint grid position of that engine manufacturer. _INTEGER_
-   - **BestQualifyingPosition**: Best qualifying position of that engine manufacturer. _INTEGER_
-   - **BestRacePosition**: Best race position of that engine manufacturer. _INTEGER_
-   - **BestSprintPosition**: Best sprint position of that engine manufacturer. _INTEGER_
+   - **SprintStarts**: Number of sprint starts. _INTEGER_
+   - **SprintEntries**: Number of sprint entries. _INTEGER_
+   - **DNFs**: Number of DNFs of that engine manufacturer. _INTEGER_
+   - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+   - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
+   - **BestGridPosition**: Best grid position. _INTEGER_
+   - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
+   - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
+   - **BestRacePosition**: Best race position. _INTEGER_
+   - **BestSprintPosition**: Best sprint position. _INTEGER_
+   - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
    - **FirstGrandPrix**: First Grand Prix of that engine manufacturer. _TEXT_
    - **LastGrandPrix**: Last Grand Prix of that engine manufacturer. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-8. ### Tyres
+10. ### Tyres
    This table contains all tyre manufacturers that have provided tyres to an entry.  
    **Columns:**
    - **ID**: Unique tyre ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -341,50 +438,67 @@ python reset.py
    - **Podiums**: Number of podiums of that tyre manufacturer. _INTEGER_
    - **Poles**: Number of pole positions of that tyre manufacturer. _INTEGER_
    - **FastestLaps**: Number of fastest laps of that tyre manufacturer. _INTEGER_
+   - **SprintWins**: Number of sprint wins. _INTEGER_
+   - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+   - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+   - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
    - **Points**: Total points of that tyre manufacturer. _REAL_
    - **Starts**: Number of starts of that tyre manufacturer. _INTEGER_
    - **Entries**: Number of entries of that tyre manufacturer. _INTEGER_
-   - **DNFs**: Number of DNFs of that tyre manufacturer. Only classified non-finishes are counted. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix) of that tyre manufacturer. _INTEGER_
-   - **BestGridPosition**: Best grid position of that tyre manufacturer. _INTEGER_
-   - **BestSprintGridPosition**: Best sprint grid position of that tyre manufacturer. _INTEGER_
-   - **BestQualifyingPosition**: Best qualifying position of that tyre manufacturer. _INTEGER_
-   - **BestRacePosition**: Best race position of that tyre manufacturer. _INTEGER_
-   - **BestSprintPosition**: Best sprint position of that tyre manufacturer. _INTEGER_
-   - **FirstGrandPrix**: First Grand Prix of that tyre manufacturer. _TEXT_
-   - **LastGrandPrix**: Last Grand Prix of that tyre manufacturer. _TEXT_
-   - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
-   - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
-
-9. ### Chassis
-   This table contains all chassis to enter a race in Formula One (e.g, the Lotus 72).  
-   **Columns:**
-   - **ID**: Unique chassis ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
-   - **ConstructorName**: Name of the constructor that made that chasis. _TEXT_
-   - **ChassisName**: Name of the chassis. _TEXT UNIQUE_
-   - **ConstructorID**: Foreign key to Constructors. _INTEGER_
-   - **Wins**: Number of wins of that chassis. _INTEGER_
-   - **Podiums**: Number of podiums of that chassis. _INTEGER_
-   - **Poles**: Number of pole positions of that chassis. _INTEGER_
-   - **FastestLaps**: Number of fastest laps of that chassis. _INTEGER_
-   - **Championships**: Number of championships of that chassis. _INTEGER_
-   - **Points**: Total points of that chassis. _REAL_
-   - **Starts**: Number of starts of that chassis. _INTEGER_
-   - **Entries**: Number of entries of that chassis. _INTEGER_
-   - **DNFs**: Number of DNFs of that chassis. Only classified non-finishes are counted. _INTEGER_
-   - **LapsLed**: Number of laps led (sprint + grand prix). _INTEGER_
+   - **SprintStarts**: Number of sprint starts. _INTEGER_
+   - **SprintEntries**: Number of sprint entries. _INTEGER_
+   - **DNFs**: Number of DNFs of that tyre manufacturer. _INTEGER_
+   - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+   - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
    - **BestGridPosition**: Best grid position. _INTEGER_
    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
    - **BestRacePosition**: Best race position. _INTEGER_
    - **BestSprintPosition**: Best sprint position. _INTEGER_
-   - **FirstGrandPrix**: First Grand Prix. _TEXT_
-   - **LastGrandPrix**: Last Grand Prix. _TEXT_
-   - **ConstructorID**: Foreign key to Constructors. _INTEGER_
+   - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
+   - **FirstGrandPrix**: First Grand Prix of that tyre manufacturer. _TEXT_
+   - **LastGrandPrix**: Last Grand Prix of that tyre manufacturer. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-10. ### EngineModels
+11. ### Chassis
+    This table contains all chassis to enter a race in Formula One (e.g, the Lotus 72).  
+    **Columns:**
+    - **ID**: Unique chassis ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+    - **ConstructorName**: Name of the constructor that made that chasis. _TEXT_
+    - **ChassisName**: Name of the chassis. _TEXT UNIQUE_
+    - **ConstructorID**: Foreign key to Constructors. _INTEGER_
+    - **Wins**: Number of wins of that chassis. _INTEGER_
+    - **Podiums**: Number of podiums of that chassis. _INTEGER_
+    - **Poles**: Number of pole positions of that chassis. _INTEGER_
+    - **FastestLaps**: Number of fastest laps of that chassis. _INTEGER_
+    - **SprintWins**: Number of sprint wins. _INTEGER_
+    - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
+    - **Points**: Total points of that chassis. _REAL_
+    - **Starts**: Number of starts of that chassis. _INTEGER_
+    - **Entries**: Number of entries of that chassis. _INTEGER_
+    - **SprintStarts**: Number of sprint starts. _INTEGER_
+    - **SprintEntries**: Number of sprint entries. _INTEGER_
+    - **DNFs**: Number of DNFs of that chassis. _INTEGER_
+    - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+    - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
+    - **BestGridPosition**: Best grid position. _INTEGER_
+    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
+    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
+    - **BestRacePosition**: Best race position. _INTEGER_
+    - **BestSprintPosition**: Best sprint position. _INTEGER_
+    - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
+    - **FirstGrandPrix**: First Grand Prix. _TEXT_
+    - **LastGrandPrix**: Last Grand Prix. _TEXT_
+    - **ConstructorID**: Foreign key to Constructors. _INTEGER_
+    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+
+12. ### EngineModels
     This table contains all engine models used in F1 (e.g, the Cosworth DFV).  
     **Columns:**
     - **ID**: Unique engine model ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -395,24 +509,33 @@ python reset.py
     - **Podiums**: Number of podiums of that engine manufacturer. _INTEGER_
     - **Poles**: Number of pole positions of that engine manufacturer. _INTEGER_
     - **FastestLaps**: Number of fastest laps of that engine manufacturer. _INTEGER_
+    - **SprintWins**: Number of sprint wins. _INTEGER_
+    - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
     - **Championships**: Number of championships of that engine manufacturer. _INTEGER_
-    - **Points**: Total points of that engine manufacturer. _REAL_
+    - **Points**: Total points. _REAL_
     - **Starts**: Number of starts of that engine manufacturer. _INTEGER_
     - **Entries**: Number of entries of that engine manufacturer. _INTEGER_
-    - **DNFs**: Number of DNFs of that engine manufacturer. Only classified non-finishes are counted. _INTEGER_
-    - **LapsLed**: Number of laps led (sprint + grand prix) of that engine manufacturer. _INTEGER_
-    - **BestGridPosition**: Best grid position of that engine manufacturer. _INTEGER_
-    - **BestSprintGridPosition**: Best sprint grid position of that engine manufacturer. _INTEGER_
-    - **BestQualifyingPosition**: Best qualifying position of that engine manufacturer. _INTEGER_
-    - **BestRacePosition**: Best race position of that engine manufacturer. _INTEGER_
-    - **BestSprintPosition**: Best sprint position of that engine manufacturer. _INTEGER_
+    - **SprintStarts**: Number of sprint starts. _INTEGER_
+    - **SprintEntries**: Number of sprint entries. _INTEGER_
+    - **DNFs**: Number of DNFs of that engine manufacturer. _INTEGER_
+    - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+    - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
+    - **BestGridPosition**: Best grid position. _INTEGER_
+    - **BestSprintGridPosition**: Best sprint grid position. _INTEGER_
+    - **BestQualifyingPosition**: Best qualifying position. _INTEGER_
+    - **BestRacePosition**: Best race position. _INTEGER_
+    - **BestSprintPosition**: Best sprint position. _INTEGER_
+    - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
     - **FirstGrandPrix**: First Grand Prix of that engine manufacturer. _TEXT_
     - **LastGrandPrix**: Last Grand Prix of that engine manufacturer. _TEXT_
     - **EngineMakeID**: Foreign key to Engines of that engine manufacturer. _INTEGER_
     - **FirstGrandPrixID**: Foreign key to GrandsPrix of that engine manufacturer. _INTEGER_
     - **LastGrandPrixID**: Foreign key to GrandsPrix of that engine manufacturer. _INTEGER_
+    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
-11. ### GrandPrixResults
+13. ### GrandPrixResults
     This table contains all race entrants for each Grand Prix, with all session results and penalties. It then has all the results for each session that driver competed in. For shared cars, there are separate entries for each driver but it has the _same_ car number. 
     
     Q1 and Q2 can mean different things over different qualifying regulations. From 1950 till 1995, there were two different qualifying sessions, one on Friday (Q1), and one on Saturday (Q2). The best time from both sessions for each driver was counted towards the overall qualifying. In 2003 and 2004, during the first qualifying session (Q1), all the drivers set one lap in championship order, with the last going first and first going last. Then, on the second qualifying session (Q2), the drivers went on another lap, with the last on the first session going first, and the first going last. Then, for the first six races in 2005, there were two different sessions; one on low fuel (Q1), and one on race fuel(Q2). Then the two times would be aggregated to set the overall qualifying times. From 2006, the slowest drivers were eliminated in Q1 and Q2, now just part of qualifying, not two separate sessions. 
@@ -444,6 +567,7 @@ python reset.py
     - **qualifyinggap**: Qualifying gap. _TEXT_
     - **qualifyingtimeinseconds**: Qualifying time in seconds. _REAL_
     - **qualifyinggapseconds**: Qualifying gap in seconds. _REAL_
+    - **qualifyinginterval**: Gap to the car ahead in qualifying. _REAL_
     - **starting_grid_position**: Starting grid position. _INTEGER_
     - **gridpenalty**: Any grid penalty applied. It can be a pit lane start ("Start from pit lane"), start from the back of the grid ("Demoted to the back of the grid"), or a grid penalty by x number of postions (e.g, "Demoted by 7 places"). _TEXT_
     - **gridpenalty_reason**: Grid penalty reason (e.g "Modifying car under Parc Fermé conditions", "Exceeding quota of powertrain elements", and so on.). _TEXT_
@@ -455,26 +579,31 @@ python reset.py
     - **fastestlapgapinseconds**: Fastest lap gap in seconds. _REAL_
     - **fastestlap_time**: Fastest lap time. _TEXT_
     - **fastestlap_gap**: Fastest lap gap. _TEXT_
+    - **fastestlapinterval**: Gap to the car with the next fastest lap. _REAL_
     - **fastestlap_lap**: Lap of fastest lap (e.g, driver set their fastest lap on the 17th lap). _INTEGER_
     - **sprintfastestlap**: Sprint fastest lap position. _INTEGER_
     - **sprintfastestlapinseconds**: Sprint fastest lap in seconds. _REAL_
     - **sprintfastestlapgapinseconds**: Sprint fastest lap gap in seconds. _REAL_
     - **sprintfastestlap_time**: Sprint fastest lap time. _TEXT_
-    - **sprintfastestlap_gap**: Sprint fastest lap gap. _TEXT_
+    - **sprintfastestlap_gap**: Sprint fastest lap time gap. _TEXT_
+    - **sprintfastestlapinterval**: Gap to the car with the next fastest sprint lap. _REAL_
     - **sprintfastestlap_lap**: Sprint fastest lap lap. _INTEGER_
     - **qualifying2position**: Q2 position. _INTEGER_
     - **qualifying2time**: Q2 time. _TEXT_
     - **qualifying2gap**: Q2 gap. _REAL_
     - **qualifying2timeinseconds**: Q2 time in seconds. _REAL_
+    - **qualifying2interval**: Gap to the car ahead in Q2. _REAL_
     - **qualifying2laps**: Q2 laps. _INTEGER_
     - **qualifying1position**: Q1 position. _INTEGER_
     - **qualifying1time**: Q1 time. _TEXT_
     - **qualifying1gap**: Q1 gap. _REAL_
     - **qualifying1timeinseconds**: Q1 time in seconds. _REAL_
+    - **qualifying1interval**: Gap to the car ahead in Q1. _REAL_
     - **qualifying1laps**: Q1 laps. _INTEGER_
     - **qualifyinglaps**: Qualifying laps. _INTEGER_
     - **qualifying3time**: Q3 time. _TEXT_
-    - **qualifying3gap**: Q3 gap. _REAL_
+    - **qualifying3gap**: Q3 gap string. _REAL_
+    - **qualifying3interval**: Gap to the car ahead in Q3. _REAL_
     - **qualifying3timeinseconds**: Q3 time in seconds. _REAL_
     - **sprint_qualifyingposition**: Sprint qualifying position. _INTEGER_
     - **sprint_qualifying1time**: Sprint Q1 time. _TEXT_
@@ -484,6 +613,7 @@ python reset.py
     - **sprint_qualifying2gap**: Sprint Q2 gap. _REAL_
     - **sprint_qualifying3gap**: Sprint Q3 gap. _REAL_
     - **sprint_qualifyinggap**: Sprint qualifying gap. _REAL_
+    - **sprint_qualifyinginterval**: Gap to the car ahead in sprint qualifying. _REAL_
     - **sprint_qualifying1timeinseconds**: Sprint Q1 time in seconds. _REAL_
     - **sprint_qualifying2timeinseconds**: Sprint Q2 time in seconds. _REAL_
     - **sprint_qualifying3timeinseconds**: Sprint Q3 time in seconds. _REAL_
@@ -499,21 +629,25 @@ python reset.py
     - **practice1time**: Practice 1 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice1gap**: Practice 1 gap. _TEXT_
     - **practice1timeinseconds**: Practice 1 time in seconds. _REAL_
+    - **practice1interval**: Gap to the car ahead in Practice 1. _REAL_
     - **practice1laps**: Practice 1 laps. _INTEGER_
     - **practice2position**: Practice 2 position. _INTEGER_
     - **practice2time**: Practice 2 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice2gap**: Practice 2 gap. _TEXT_
     - **practice2timeinseconds**: Practice 2 time in seconds. _REAL_
+    - **practice2interval**: Gap to the car ahead in Practice 2. _REAL_
     - **practice2laps**: Practice 2 laps. _INTEGER_
     - **practice3position**: Practice 3 position. _INTEGER_
     - **practice3time**: Practice 3 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice3gap**: Practice 3 gap. _TEXT_
     - **practice3timeinseconds**: Practice 3 time in seconds. _REAL_
+    - **practice3interval**: Gap to the car ahead in Practice 3. _REAL_
     - **practice3laps**: Practice 3 laps. _INTEGER_
     - **practice4position**: Practice 4 position. _INTEGER_
     - **practice4time**: Practice 4 time. It only shows the gap for those who are not the leader. _TEXT_
     - **practice4gap**: Practice 4 gap. _TEXT_
     - **practice4timeinseconds**: Practice 4 time in seconds. _REAL_
+    - **practice4interval**: Gap to the car ahead in Practice 4. _REAL_
     - **practice4laps**: Practice 4 laps. _INTEGER_
     - **sprintposition**: Sprint position. _INTEGER_
     - **sprintlaps**: Sprint laps. _INTEGER_
@@ -522,6 +656,9 @@ python reset.py
     - **sprinttimeinseconds**: Sprint time in seconds. _REAL_
     - **sprintgap**: Sprint gap. _TEXT_
     - **sprintgapinseconds**: Sprint gap in seconds. _REAL_
+    - **sprintinterval**: Gap to the car ahead in the Sprint. _REAL_
+    - **sprintstatus**: Status of the car in the sprint (e.g. Did not finish, Disqualified, etc.). _TEXT_
+    - **sprintstatusreason**: Reason for the status in the sprint (e.g. "Engine failure"). _TEXT_
     - **raceposition**: Race position. _INTEGER_
     - **racelaps**: Race laps. _INTEGER_
     - **racetime**: Race time. If the car retired, did not start, got disqualified, or anything else, the reason for retirement is given. _TEXT_
@@ -529,6 +666,9 @@ python reset.py
     - **racetimeinseconds**: Race time in seconds. _REAL_
     - **racegap**: Race gap. _TEXT_
     - **racegapinseconds**: Race gap in seconds. _REAL_
+    - **raceinterval**: Gap to the car ahead in the Race. _REAL_
+    - **racestatus**: Status of the car in the race (Did not finish, Disqualified, etc.). _TEXT_
+    - **racestatusreason**: Reason for the status in the race (e.g, "Collision with car ahead"). _TEXT_
     - **penalties**: Penalties (JSON). _TEXT_
 
       It has the following keys:
@@ -556,7 +696,7 @@ python reset.py
     - **grandprixid**: Foreign key to GrandsPrix. _INTEGER_
     - **nationalityid**: Foreign key to Nationalities. _INTEGER_
 
-12. ### PitStopSummary
+14. ### PitStopSummary
     This table shows the pit stops done during the race.  
     **Columns:**
     - **GrandPrix**: Name of the Grand Prix. _TEXT_
@@ -570,25 +710,34 @@ python reset.py
     - **TimeOfDayStopped**: Time of day. _TEXT_
     - **TotalTimeSpentInPitLane**: Total pit lane time (all the stops combined till that point). _TEXT_
     - **TotalTimeinSeconds**: Total pit lane time in seconds. _REAL_
+    - **DurationStoppedInPitBox**: Duration stationary in the pit box. _REAL_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **DriverID**: Foreign key to Drivers. _INTEGER_
     - **ConstructorID**: Foreign key to Constructors. _INTEGER_
 
-13. ### LapByLap
+15. ### LapByLap
     This table has the lap-by-lap data for each race.  
     **Columns:**
     - **GrandPrix**: Name of the Grand Prix. _TEXT_
     - **Driver**: Driver name. _TEXT_
     - **Position**: Position on that lap. _INTEGER_
     - **Lap**: Lap number. _INTEGER_
-    - **Type**: Session type. For Grands Prix, the type is "grandprix", and for Sprints, the type is "sprint" _TEXT_
+    - **Type**: Session type. For Grands Prix, the type is "grandprix", and for Sprints, the type is "sprint". We also have "practice1", "practice2", "practice3", and "qualifying" _TEXT_
     - **SafetyCar**: Safety car/ Virtual Safety car status. `true` for Safety Car/Virtual Safety Car in force that lap, `false` otherwise. _BOOLEAN_
     - **Time**: Lap time. Available from 1996. _TEXT_
     - **TimeInSeconds**: Lap time in seconds. _REAL_
+    - **TyreCompound**: The tyre compound used on this lap (Soft, Medium, Hard, etc.). _TEXT_
+    - **StintNumber**: The current stint number for the driver. A stint is a period of time during which the driver did not pass through the pit lane.  A new stint starts the lap in which the driver exits the pit lane. So, even if the driver does not change tyres, a new stint is started. _INTEGER_
+    - **Sector1Time**: Time spent in Sector 1. _REAL_
+    - **Sector2Time**: Time spent in Sector 2. _REAL_
+    - **Sector3Time**: Time spent in Sector 3. _REAL_
+    - **TyreAge**: Number of laps the current set of tyres has done. _INTEGER_
+    - **TrackStatus**: Condition of the track (Green, Yellow, SC, VSC, etc.). _TEXT_
+    - **QualifyingSegment**: For qualifying laps, which segment (Q1, Q2, Q3, SQ1, SQ2, SQ3) it belongs to. _TEXT_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **DriverID**: Foreign key to Drivers. _INTEGER_
 
-14. ### DriversChampionship
+16. ### DriversChampionship
     This table has the championship results for drivers for every year.  
     **Columns:**
     - **ID**: Unique ID (year+driver). _TEXT PRIMARY KEY_
@@ -611,7 +760,7 @@ python reset.py
     - **DriverID**: Foreign key to Drivers. _INTEGER_
     - **NationalityID**: Foreign key to Nationalities. _INTEGER_
 
-15. ### ConstructorsChampionship
+17. ### ConstructorsChampionship
     This table has the championship results for constructors for every year.  
     **Columns:**
     - **ID**: Unique ID (year+constructor+engine). _TEXT PRIMARY KEY_
@@ -626,7 +775,7 @@ python reset.py
     - **EngineID**: Foreign key to Engines. _INTEGER_
     - **EngineModelID**: Foreign key to EngineModels. _INTEGER_
 
-16. ### InSeasonProgressDrivers
+18. ### InSeasonProgressDrivers
     This table has the progress of each driver over the season. It is recorded after each race.  
     **Columns:**
     - **ID**: Unique ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -635,9 +784,9 @@ python reset.py
     - **Driver**: Driver name. _TEXT_
     - **PointsAtThisPoint**: Points at this point, that is, after this race. _REAL_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
-    - **DriverID**: Foreign key to Drivers. _INTEGER_
+    - **DriverID**: Foreign key to Drivers. _INTEGER__
 
-17. ### InSeasonProgressConstructors
+19. ### InSeasonProgressConstructors
     This table has the progress of each constructor over the season. It is recorded after each race.    
     **Columns:**
     - **ID**: Unique ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -650,7 +799,7 @@ python reset.py
     - **ConstructorID**: Foreign key to Constructors. _INTEGER_
     - **EngineID**: Foreign key to Engines. _INTEGER_
 
-18. ### Nationalities
+20. ### Nationalities
     This table contains all nationalities that have participated in F1.  
     **Columns:**
     - **ID**: Unique nationality ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
@@ -658,25 +807,61 @@ python reset.py
     - **FirstGrandPrix**: First Grand Prix of that nationality. _TEXT_
     - **LastGrandPrix**: Last Grand Prix of that nationality. _TEXT_
     - **DriverCount**: Number of drivers of that nationality. _INTEGER DEFAULT 0_
-    - **Wins**: Number of wins of that nationality. _INTEGER DEFAULT 0_
-    - **Podiums**: Number of podiums of that nationality. _INTEGER DEFAULT 0_
-    - **Poles**: Number of pole positions of that nationality. _INTEGER DEFAULT 0_
-    - **FastestLaps**: Number of fastest laps of that nationality. _INTEGER DEFAULT 0_
-    - **Championships**: Number of championships of that nationality. _INTEGER DEFAULT 0_
-    - **Points**: Total points of that nationality. _REAL DEFAULT 0_
-    - **Starts**: Number of starts of that nationality. _INTEGER DEFAULT 0_
-    - **Entries**: Number of entries of that nationality. _INTEGER DEFAULT 0_
-    - **DNFs**: Number of DNFs of that nationality. Only classified non-finishes are counted. _INTEGER DEFAULT 0_
-    - **LapsLed**: Number of laps led (sprint + grand prix) of that nationality. _INTEGER DEFAULT 0_
+    - **Wins**: Number of wins of that nationality. _INTEGER_
+    - **Podiums**: Number of podiums of that nationality. _INTEGER_
+    - **Poles**: Number of pole positions of that nationality. _INTEGER_
+    - **FastestLaps**: Number of fastest laps of that nationality. _INTEGER_
+    - **SprintWins**: Number of sprint wins. _INTEGER_
+    - **SprintPodiums**: Number of sprint podiums. _INTEGER_
+    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
+    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
+    - **Championships**: Number of championships of that nationality. _INTEGER_
+    - **Points**: Total points. _REAL_
+    - **Starts**: Number of starts of that nationality. _INTEGER_
+    - **Entries**: Number of entries of that nationality. _INTEGER_
+    - **SprintStarts**: Number of sprint starts. _INTEGER_
+    - **SprintEntries**: Number of sprint entries. _INTEGER_
+    - **DNFs**: Number of DNFs of that nationality. _INTEGER_
+    - **GrandPrixLapsLed**: Number of grand prix laps led. _INTEGER_
+    - **SprintLapsLed**: Number of sprint laps led. _INTEGER_
     - **BestGridPosition**: Best grid position of that nationality. _INTEGER_
     - **BestSprintGridPosition**: Best sprint grid position of that nationality. _INTEGER_
     - **BestQualifyingPosition**: Best qualifying position of that nationality. _INTEGER_
     - **BestRacePosition**: Best race position of that nationality. _INTEGER_
     - **BestSprintPosition**: Best sprint position of that nationality. _INTEGER_
+    - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
     - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
-    - **FirstDriver**: First driver. _TEXT_
-    - **LastDriver**: Last driver. _TEXT_
+    - **FirstDriver**: First driver who represented this nationality. _TEXT_
+    - **LastDriver**: Most recent driver who represented this nationality. _TEXT_
     - **FirstDriverID**: Foreign key to Drivers. _INTEGER_
     - **LastDriverID**: Foreign key to Drivers. _INTEGER_
+    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+
+21. ### RaceReports
+    This table contains the full race reports for every Grand Prix.
+    **Columns:**
+    - **ID**: Primary key, matching the Grand Prix ID. _INTEGER PRIMARY KEY_
+    - **GrandPrixName**: Name of the Grand Prix. _TEXT UNIQUE_
+    - **RaceReport**: The full text of the race report. _TEXT_
+
+## Roadmap:
+We are working on adding more features to the database to make it even more comprehensive. Some of the features and/or changes we want to add in the future include:
+- Add robust OCR detection for the circuit layouts. Currently, my attempt of the OCR detection is not very accurate as it includes false positives, false negatives, and incorrect detection. Once a robust OCR detection is added, we can add corner names and numbers to the circuit layout SVGs.
+- Check the viability of adding telemetry data and add if viable, including mini-sectors.
+- Make `writedb.py` more efficient. Currently a lot of the code is O(n^2) and can be optimised.
+- Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
+
+We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
+
+## Contributing
+Contributions are welcome! If you find any data inaccuracies or want to suggest new features:
+1. Fork the repository.
+2. Create a new branch for your changes.
+3. Submit a Pull Request with a detailed description of your updates.
+4. Ensure any schema changes are also updated in `reset.py`.
+
+Even if you don't have any code to contribute, you can still help by suggesting new features or contributing to the Wikipedia pages of race reports. Currently, a lot of pages of the race reports don't have enough data showing what happened. You can change that by editing and contributing to the Wikipedia pages of race reports. This helps both the F1 community as well as this database.
+
+For major changes, please open an issue first to discuss what you would like to change.
 
