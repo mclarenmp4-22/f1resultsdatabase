@@ -70,7 +70,7 @@ python reset.py
 ## Delete a specific season:
 If you want to delete data for a single season (e.g. to re-scrape it), run:
 ```bash
-python py/deleteseason.py <year>
+python deleteseason.py <year>
 ```
 This will remove all races, results, and standings for that year while keeping the rest of the database intact.
 
