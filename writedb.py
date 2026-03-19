@@ -16,7 +16,7 @@ import warnings
 # Suppress technical warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-conn = sqlite3.connect('py/sessionresults.db')
+conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
 
