@@ -20,28 +20,6 @@ conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
 
-def ensure_column(table, col, coldef):
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = {row[1] for row in cur.fetchall()}
-    if col not in cols:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
-
-# Auto-migrate older DBs to include newer stat/update columns.
-ensure_column("Seasons", "TotalGrandPrix", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalDrivers", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalConstructors", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalEngines", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalTeams", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalEngineModels", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalChassis", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "TotalNationalities", "INTEGER DEFAULT 0")
-ensure_column("Seasons", "needstatsupdate", "BOOLEAN DEFAULT 0")
-
-for _table in ["Drivers", "Constructors", "Engines", "Chassis", "EngineModels", "Tyres", "Teams", "Nationalities"]:
-    ensure_column(_table, "SeasonsRaced", "INTEGER DEFAULT 0")
-
-
-
 def normalize_name(name):
   """
   Normalizes a name for comparison by converting to lowercase and decomposing
@@ -52,7 +30,7 @@ def normalize_name(name):
   if name.lower() == "gianmaria bruni":
     return "gimmi bruni"
   elif name.lower() == "zhou guanyu":
-    return "zhou guanyu"
+    return "guanyu zhou"
   # Normalizes to decomposed form, converts to lowercase, and removes accents
   return unicodedata.normalize('NFKD', name.lower()).encode('ascii', 'ignore').decode('ascii').replace('-', ' ')
 
@@ -1398,6 +1376,16 @@ def fetch_race_report(gp):
     return content
 
 def tts_to_normal(tts):
+/*************  ✨ Windsurf Command ⭐  *************/
+    """
+    Converts a time in seconds (tts) to a human-readable format of minutes:seconds.
+    
+    :param tts: Time in seconds
+    :type tts: float or None
+    :return: Time in minutes:seconds format
+    :rtype: str or None
+    """
+/*******  2c00ecab-31f0-41ab-83ef-a5a96058daa3  *******/
     if tts is None:
         return None
     # change 60.429 to 1:00.429
@@ -2800,9 +2788,9 @@ def scrape_mss_laptimes(url, entrants):
                 for lapdata in driver['laps']:
                     lap = {
                         'driver': entrant['driver'],
-                        'lap': lapdata['lapNumber'],
-                        'timeinseconds': float(Decimal(str(lapdata['lapTime'])).quantize(Decimal('0.001'))) if lapdata['lapTime'] is not None else None,
-                        'time': tts_to_normal(lapdata['lapTime']) if lapdata['lapTime'] is not None else None
+                        'lap': lapdata['lap'],
+                        'timeinseconds': float(Decimal(str(lapdata['time'])).quantize(Decimal('0.001'))) if lapdata['time'] is not None else None,
+                        'time': tts_to_normal(lapdata['time']) if lapdata['time'] is not None else None
                     }
                     laps.append(lap)
 
@@ -3696,11 +3684,11 @@ for season in seasons[index:]:
                     grandprixlinks.append({'href': f'https://motorsportstats.com/api/results-classification?sessionSlug={openurl}'}) #remember to parse sprint qualifying also
                 elif 'sprint' in openurl:
                     grandprixlinks.append({'href': f'https://motorsportstats.com/api/results-classification?sessionSlug={openurl}'})
-                if 'practice' in openurl and (1076 < race_info['race_number'] < 1080 or race_info['race_number'] > 1106):
+                if 'practice' in openurl and (1076 < race_info['race_number'] < 1079 or race_info['race_number'] > 1106):
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
-                if 'qualifying' in openurl and (1076 < race_info['race_number'] < 1080 or race_info['race_number'] > 1106):
+                if 'qualifying' in openurl and (race_info['race_number'] > 1106):
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
-                if 'sprint-qualifying' in openurl and (1076 < race_info['race_number'] < 1080 or race_info['race_number'] > 1106):
+                if 'sprint-qualifying' in openurl and (race_info['race_number'] > 1106):
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
                 if 'sprint' in openurl and race_info['race_number'] > 1106:
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
@@ -3955,7 +3943,7 @@ for season in seasons[index:]:
                         # Get lap chart data for FP1 positions
                         fp1_lap_chart = {}
                         if fp1:
-                            fp1_chart_data = readlapcharts(fp1.replace('&sessionFact=LapTimes', '&sessionFact=LapChart'))
+                            fp1_chart_data = readlapcharts(fp1.replace('&sessionFact=LapTime', '&sessionFact=LapChart'))
                             # Convert to driver name lookup
                             for driver_num, lap_positions in fp1_chart_data.items():
                                 for entrant in results:
@@ -4015,7 +4003,7 @@ for season in seasons[index:]:
                         # Get lap chart data for FP2 positions
                         fp2_lap_chart = {}
                         if fp2:
-                            fp2_chart_data = readlapcharts(fp2.replace('&sessionFact=LapTimes', '&sessionFact=LapChart'))
+                            fp2_chart_data = readlapcharts(fp2.replace('&sessionFact=LapTime', '&sessionFact=LapChart'))
                             for driver_num, lap_positions in fp2_chart_data.items():
                                 for entrant in results:
                                     if entrant['number'] == driver_num:
@@ -4074,7 +4062,7 @@ for season in seasons[index:]:
                         # Get lap chart data for FP3 positions
                         fp3_lap_chart = {}
                         if fp3:
-                            fp3_chart_data = readlapcharts(fp3.replace('&sessionFact=LapTimes', '&sessionFact=LapChart'))
+                            fp3_chart_data = readlapcharts(fp3.replace('&sessionFact=LapTime', '&sessionFact=LapChart'))
                             for driver_num, lap_positions in fp3_chart_data.items():
                                 for entrant in results:
                                     if entrant['number'] == driver_num:
@@ -4133,7 +4121,7 @@ for season in seasons[index:]:
                                     sq_mss_laps[key] = lap
                                 
                                 # Get lap chart for this segment
-                                chart_data = readlapcharts(session_url.replace('&sessionFact=LapTimes', '&sessionFact=LapChart'))
+                                chart_data = readlapcharts(session_url.replace('&sessionFact=LapTime', '&sessionFact=LapChart'))
                                 for driver_num, lap_positions in chart_data.items():
                                     for entrant in results:
                                         if entrant['number'] == driver_num:
@@ -4202,7 +4190,7 @@ for season in seasons[index:]:
                                     q_mss_laps[key] = lap
                                 
                                 # Get lap chart for this segment
-                                chart_data = readlapcharts(session_url.replace('&sessionFact=LapTimes', '&sessionFact=LapChart'))
+                                chart_data = readlapcharts(session_url.replace('&sessionFact=LapTime', '&sessionFact=LapChart'))
                                 for driver_num, lap_positions in chart_data.items():
                                     for entrant in results:
                                         if entrant['number'] == driver_num:
