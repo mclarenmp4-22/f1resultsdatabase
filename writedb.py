@@ -16,7 +16,7 @@ import warnings
 # Suppress technical warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-conn = sqlite3.connect('sessionresults.db')
+conn = sqlite3.connect('py/sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
 
@@ -1376,16 +1376,6 @@ def fetch_race_report(gp):
     return content
 
 def tts_to_normal(tts):
-/*************  ✨ Windsurf Command ⭐  *************/
-    """
-    Converts a time in seconds (tts) to a human-readable format of minutes:seconds.
-    
-    :param tts: Time in seconds
-    :type tts: float or None
-    :return: Time in minutes:seconds format
-    :rtype: str or None
-    """
-/*******  2c00ecab-31f0-41ab-83ef-a5a96058daa3  *******/
     if tts is None:
         return None
     # change 60.429 to 1:00.429
