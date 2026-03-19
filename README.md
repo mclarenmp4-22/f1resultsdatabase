@@ -747,7 +747,7 @@ This will remove all races, results, and standings for that year while keeping t
     **Columns:**
     - **ID**: Unique ID (year+driver). _TEXT PRIMARY KEY_
     - **Season**: Year. _INTEGER_
-    - **Position**: Position in standings. _INTEGER_
+    - **Position**: Position in standings. The position is *NULL* until the position is mathematically locked, i.e., no driver can overtake them in the standings, and they can't overtake any driver in the standings. _INTEGER_
     - **Driver**: Driver name. _TEXT_
     - **Points**: Points scored. _REAL_
     - **OutOf**: Points out of. _REAL_
@@ -774,7 +774,7 @@ This will remove all races, results, and standings for that year while keeping t
     **Columns:**
     - **ID**: Unique ID (year+constructor+engine). _TEXT PRIMARY KEY_
     - **Season**: Year. _INTEGER_
-    - **Position**: Position in standings. _INTEGER_
+    - **Position**: Position in standings. The position is *NULL* until the position is mathematically locked, i.e., no constructor can overtake them in the standings, and they can't overtake any constructor in the standings.  _INTEGER_
     - **Constructor**: Constructor name. _TEXT_
     - **Engine**: Engine name. _TEXT_
     - **Points**: Points scored. _REAL_
@@ -860,6 +860,7 @@ We are working on adding more features to the database to make it even more comp
 - Check the viability of adding telemetry data and add if viable, including mini-sectors.
 - Make `writedb.py` more efficient. Currently a lot of the code is O(n^2) and can be optimised.
 - Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
+- Make the race report scraping better. We can add bulletted lists next, maybe.
 
 We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
 
