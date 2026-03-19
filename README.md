@@ -51,8 +51,7 @@ OR
 pip install gdown 
 python download_db.py
 ```
-**Last updated: 2025 Abu Dhabi Grand Prix**
-Note: The last available version available for download is still version 1 as some data is still not uploaded for the 2026 season. 
+**Last updated: 2026 Chinese Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -758,10 +757,14 @@ This will remove all races, results, and standings for that year while keeping t
 
       **Key**: It is the Grand Prix.
 
-      **Value**: In the form of an array. The 0th element has the number of points scored. The 1st element has the info whether the score was dropped(whether it did not count towards the championship). `true` means the score was dropped. `false` means the score was not dropped. `null` means the driver scored 0 points in that race. If there is a `[null, null]`, it indicates that the driver did not take part in that race in the season, or the event is upcoming.
+      **Value**: In the form of an array. The 0th element has the number of points scored. The 1st element has the info whether the score was dropped(whether it did not count towards the championship). `true` means the score was dropped. `false` means the score was not dropped. `null` means the driver scored 0 points in that race. If there is a `[null, null]`, it indicates that the driver did not take part in that race in the season, or the event is upcoming. The third element in this list is "gp" or "sp". If it is "gp", it indicates it is a Grand Prix weekend, and if it is "sp", it indicates a sprint weekend.
       For example, here's Alain Prost's `RaceByRace` during the 1988 season:
       ```
-      {"Brazil": [9.0, false], "San Marino": [6.0, false], "Monaco": [9.0, false], "Mexico": [9.0, false], "Canada": [6.0, false], "Detroit": [6.0, false], "France": [9.0, false], "Britain": [0, null], "Germany": [6.0, false], "Hungary": [6.0, true], "Belgium": [6.0, true], "Italy": [0, null], "Portugal": [9.0, false], "Spain": [9.0, false], "Japan": [6.0, true], "Australia": [9.0, false]}
+      {"Brazil": [9.0, false, "gp"], "San Marino": [6.0, false, "gp"], "Monaco": [9.0, false, "gp"], "Mexico": [9.0, false, "gp"], "Canada": [6.0, false, "gp"], "Detroit": [6.0, false, "gp"], "France": [9.0, false, "gp"], "Britain": [0, null, "gp"], "Germany": [6.0, false, "gp"], "Hungary": [6.0, true, "gp"], "Belgium": [6.0, true, "gp"], "Italy": [0, null, "gp"], "Portugal": [9.0, false, "gp"], "gp", "Spain": [9.0, false, "gp"], "Japan": [6.0, true, "gp"], "Australia": [9.0, false, "gp"]}
+      ```
+      And here's Oscar Piastri's `RaceByRace` for the 2025 season:
+      ```
+      {"Australia": [2.0, false, "gp"], "China": [32.0, false, "sp"], "Japan": [15.0, false, "gp"], "Bahrain": [25.0, false, "gp"], "Saudi Arabia": [25.0, false, "gp"], "Miami": [32.0, false, "sp"], "Emilia-Romagna": [15.0, false, "gp"], "Monaco": [15.0, false, "gp"], "Spain": [25.0, false, "gp"], "Canada": [12.0, false, "gp"], "Austria": [18.0, false, "gp"], "Britain": [18.0, false, "gp"], "Belgium": [32.0, false, "sp"], "Hungary": [18.0, false, "gp"], "Netherlands": [25.0, false, "gp"], "Italy": [15.0, false, "gp"], "Azerbaijan": [0, null, "gp"], "Singapore": [12.0, false, "gp"], "USA": [10.0, false, "sp"], "Mexico City": [10.0, false, "gp"], "São Paulo": [10.0, false, "sp"], "Las Vegas": [0, null, "gp"], "Qatar": [26.0, false, "sp"], "Abu Dhabi": [18.0, false, "gp"]}
       ```
     - **DriverID**: Foreign key to Drivers. _INTEGER_
     - **NationalityID**: Foreign key to Nationalities. _INTEGER_

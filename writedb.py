@@ -4440,7 +4440,7 @@ def get_grand_slam_candidates(cur):
         SELECT L.grandprixid, L.lap, L.driverid, L.position
         FROM LapByLap L
         JOIN GrandPrixResults G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
-        WHERE L.Type = 'grandprix' AND G.needstatsupdate = 1
+        WHERE L.Type = 'grandprix' AND G.driverid IN (SELECT ID FROM Drivers WHERE needstatsupdate = 1)
     """)
     rows = cur.fetchall()
 
@@ -4462,15 +4462,16 @@ def get_grand_slam_candidates(cur):
 led_every_lap_set = get_grand_slam_candidates(cur)
 
 cur.execute("""
-    SELECT driverid, grandprixID
-    FROM GrandPrixResults 
-    WHERE raceposition = 1 
-    AND starting_grid_position = 1 
-    AND fastestlap = 1
-    AND racestatus NOT LIKE '%(Did not finish)%'
-    AND racestatus NOT LIKE '%(Did not start)%'
-    AND racestatus NOT LIKE '%(Disqualified)%'
-    AND needstatsupdate = 1
+    SELECT g.driverid, g.grandprixid
+    FROM GrandPrixResults g
+    JOIN Drivers d ON g.driverid = d.ID
+    WHERE g.raceposition = 1 
+    AND g.starting_grid_position = 1 
+    AND g.fastestlap = 1
+    AND g.racestatus NOT LIKE '%(Did not finish)%'
+    AND g.racestatus NOT LIKE '%(Did not start)%'
+    AND g.racestatus NOT LIKE '%(Disqualified)%'
+    AND d.needstatsupdate = 1
 """)
 possible_grandslams = cur.fetchall()
 
@@ -4568,7 +4569,6 @@ cur.execute("UPDATE EngineModels SET SprintWins = (SELECT COUNT(*) FROM GrandPri
 cur.execute("UPDATE EngineModels SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintposition <= 3 AND needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintfastestlap = 1 AND needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.enginemodelid = EngineModels.ID AND ConstructorsChampionship.Position = 1 AND needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.racestatus NOT LIKE '%(Did not start)%' AND GrandPrixResults.raceposition IS NOT NULL AND needstatsupdate = 1)")
@@ -4663,10 +4663,11 @@ def update_laps_led_for_component(cur, component_table, component_id_column):
     SELECT G.{component_id_column}, COUNT(*) AS laps_led
     FROM LapByLap AS L
     JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
+    JOIN {component_table} AS C ON G.{component_id_column} = C.ID
     WHERE L.position = 1
       AND L.Type = 'grandprix'
       AND G.{component_id_column} IS NOT NULL
-      AND G.needstatsupdate = 1
+      AND C.needstatsupdate = 1
     GROUP BY G.{component_id_column}
     """
     cur.execute(query_gp)
@@ -4683,10 +4684,11 @@ def update_laps_led_for_component(cur, component_table, component_id_column):
     SELECT G.{component_id_column}, COUNT(*) AS laps_led
     FROM LapByLap AS L
     JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
+    JOIN {component_table} AS C ON G.{component_id_column} = C.ID
     WHERE L.position = 1
       AND L.Type = 'sprint'
       AND G.{component_id_column} IS NOT NULL
-      AND G.needstatsupdate = 1
+      AND C.needstatsupdate = 1
     GROUP BY G.{component_id_column}
     """
     cur.execute(query_sprint)
