@@ -4726,5 +4726,10 @@ print("All stats updated successfully. Closing database connection...")
 
 
 conn.commit() 
+
+print("Running database optimization (this may take a moment)...")
+cur.execute("VACUUM")
+print("Database optimization complete.")
+
 conn.close()
 #fi.close()
