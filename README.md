@@ -205,6 +205,15 @@ This will remove all races, results, and standings for that year while keeping t
    - **MaxFuelConsumption**: Maximum fuel consumption. _TEXT_
 
    For seasons where there was no limit, the value would be "free". The values can also range from "200 litres" to "free (naturally aspirated) or 195 litres (supercharged)" to "100 kg and 100 kg/hour". In the last example, the first part ("100 kg") shows the fuel tank capacity (the maximum amount of fuel consumed per race) annd the second part ("100 kg/hour") shows the fuel flow limit.
+   - **TotalGrandPrix**: Total number of World Championship Grands Prix held up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalDrivers**: Total number of drivers to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalConstructors**: Total number of constructors to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalEngines**: Total number of engine manufacturers to have powered a World Championship Grand Prix entry up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalTeams**: Total number of teams to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalEngineModels**: Total number of engine models used in World Championship Grands Prix up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalChassis**: Total number of chassis to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
+   - **TotalNationalities**: Total number of nationalities represented by drivers up to and including this season. _INTEGER DEFAULT 0_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 2. ### Circuits
    This table contains all circuits which have hosted a Grand Prix.  
@@ -236,6 +245,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **CircuitChanges**: Description of changes from the previous version. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 4. ### GrandsPrix
    This table contains all Grands Prix.  
@@ -301,6 +311,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **SprintPoles**: Number of sprint pole positions of that driver. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps of that driver. _INTEGER_
    - **Championships**: Number of championships of that driver. _INTEGER_
+   - **SeasonsRaced**: Number of seasons in which that driver entered at least one World Championship Grand Prix weekend. This does not count FP1 appearances or drivers who were on the entry list but did not participate in the Grand Prix, but even drivers who did not pre-qualify are considered as having raced in that season. _INTEGER_
    - **Points**: Total points of that driver. _REAL_
    - **Starts**: Number of starts of that driver. _INTEGER_
    - **Entries**: Number of entries of that driver. _INTEGER_
@@ -341,6 +352,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **SprintPodiums**: Number of sprint podiums of that team. _INTEGER_
    - **SprintPoles**: Number of sprint pole positions of that team. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps of that team. _INTEGER_
+   - **SeasonsRaced**: Number of seasons in which that team entered at least one World Championship Grand Prix weekend. _INTEGER_
    - **Starts**: Number of starts of that team. _INTEGER_
    - **Entries**: Number of entries of that team. _INTEGER_
    - **SprintStarts**: Number of sprint starts of that team. _INTEGER_
@@ -373,6 +385,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
    - **Championships**: Number of championships of that constructor. _INTEGER_
+   - **SeasonsRaced**: Number of seasons in which that constructor entered at least one World Championship Grand Prix weekend. _INTEGER_
    - **Points**: Total points of that constructor. _REAL_
    - **Starts**: Number of starts of that constructor. _INTEGER_
    - **Entries**: Number of entries of that constructor. _INTEGER_
@@ -409,6 +422,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
    - **Championships**: Number of championships of that engine manufacturer. _INTEGER_
+   - **SeasonsRaced**: Number of seasons in which that engine manufacturer entered at least one World Championship Grand Prix weekend. _INTEGER_
    - **Points**: Total points. _REAL_
    - **Starts**: Number of starts of that engine manufacturer. _INTEGER_
    - **Entries**: Number of entries of that engine manufacturer. _INTEGER_
@@ -442,6 +456,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **SprintPodiums**: Number of sprint podiums. _INTEGER_
    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
+   - **SeasonsRaced**: Number of seasons in which that tyre manufacturer entered at least one World Championship Grand Prix weekend. _INTEGER_
    - **Points**: Total points of that tyre manufacturer. _REAL_
    - **Starts**: Number of starts of that tyre manufacturer. _INTEGER_
    - **Entries**: Number of entries of that tyre manufacturer. _INTEGER_
@@ -477,6 +492,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **SprintPodiums**: Number of sprint podiums. _INTEGER_
     - **SprintPoles**: Number of sprint pole positions. _INTEGER_
     - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
+    - **SeasonsRaced**: Number of seasons in which that chassis entered at least one World Championship Grand Prix weekend. _INTEGER_
     - **Points**: Total points of that chassis. _REAL_
     - **Starts**: Number of starts of that chassis. _INTEGER_
     - **Entries**: Number of entries of that chassis. _INTEGER_
@@ -514,6 +530,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **SprintPoles**: Number of sprint pole positions. _INTEGER_
     - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
     - **Championships**: Number of championships of that engine manufacturer. _INTEGER_
+    - **SeasonsRaced**: Number of seasons in which that engine model entered at least one World Championship Grand Prix weekend. _INTEGER_
     - **Points**: Total points. _REAL_
     - **Starts**: Number of starts of that engine manufacturer. _INTEGER_
     - **Entries**: Number of entries of that engine manufacturer. _INTEGER_
@@ -615,8 +632,11 @@ This will remove all races, results, and standings for that year while keeping t
     - **sprint_qualifying2time**: Sprint Q2 time. _TEXT_
     - **sprint_qualifying3time**: Sprint Q3 time. _TEXT_
     - **sprint_qualifying1gap**: Sprint Q1 gap. _REAL_
+    - **sprint_qualifying1interval**: Gap to the car ahead in sprint qualifying Q1. _REAL_
     - **sprint_qualifying2gap**: Sprint Q2 gap. _REAL_
+    - **sprint_qualifying2interval**: Gap to the car ahead in sprint qualifying Q2. _REAL_
     - **sprint_qualifying3gap**: Sprint Q3 gap. _REAL_
+    - **sprint_qualifying3interval**: Gap to the car ahead in sprint qualifying Q3. _REAL_
     - **sprint_qualifyinggap**: Sprint qualifying gap. _REAL_
     - **sprint_qualifyinginterval**: Gap to the car ahead in sprint qualifying. _REAL_
     - **sprint_qualifying1timeinseconds**: Sprint Q1 time in seconds. _REAL_
@@ -716,6 +736,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **TotalTimeSpentInPitLane**: Total pit lane time (all the stops combined till that point). _TEXT_
     - **TotalTimeinSeconds**: Total pit lane time in seconds. _REAL_
     - **DurationStoppedInPitBox**: Duration stationary in the pit box. _REAL_
+    - **type**: Type of pit stop, such as a normal tyre stop or another kind of service stop. _TEXT_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **DriverID**: Foreign key to Drivers. _INTEGER_
     - **ConstructorID**: Foreign key to Constructors. _INTEGER_
@@ -825,6 +846,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **SprintPoles**: Number of sprint pole positions. _INTEGER_
     - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
     - **Championships**: Number of championships of that nationality. _INTEGER_
+    - **SeasonsRaced**: Number of seasons in which a driver of that nationality entered at least one World Championship Grand Prix weekend. _INTEGER_
     - **Points**: Total points. _REAL_
     - **Starts**: Number of starts of that nationality. _INTEGER_
     - **Entries**: Number of entries of that nationality. _INTEGER_
