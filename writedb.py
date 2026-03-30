@@ -3372,7 +3372,8 @@ else:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
     #if there are less than 1149 grands prix in the database, this will suffice.
     count = cur.fetchone()[0]
-    if count < 1149:
+    if count < 1161:
+        #Madrid is race 1161
         mappings = {'Adelaide': ('-34.9269993', '138.6172609'), 'Aida': ('34.9152924', '134.2207281'), 'Ain-Diab': ('33.5805298', '-7.68909'), 'Aintree': ('53.4759049', '-2.9413726'), 'Anderstorp': ('57.2639056', '13.6030116'), 'Austin': ('30.1336367', '-97.6345729'), 'AVUS': ('52.48658', '13.26549'), 'Baku': ('40.3712591', '49.8476935'), 'Barcelona': ('41.5682768', '2.2582064'), 'Brands Hatch': ('51.3555433', '0.2629122'), 'Bremgarten': ('46.9581878', '7.402719'), 'Buenos Aires': ('-34.6922845', '-58.4550501'), 'Caesars Palace': ('36.119148', '-115.1771724'), 'Clermont-Ferrand': ('45.7456087', '3.0402848'), 'Dallas': ('32.7767709', '-96.7593567'), 'Detroit': ('42.3280081', '-83.0405242'), 'Dijon-Prenois': ('47.3619752', '4.8995105'), 'Donington': ('52.8296656', '-1.3749465'), 'East London': ('-33.0491788', '27.8745906'), 'Estoril': ('38.7491677', '-9.394149'), 'Fuji': ('35.3689657', '138.9281865'), 'Hockenheim': ('49.3308527', '8.5790215'), 'Hungaroring': ('47.5817579', '19.2507484'), 'Imola': ('44.3398577', '11.7133288'), 'Indianapolis': ('39.7955151', '-86.2362663,4080a,20y'), 'Interlagos': ('-23.7032926', '-46.696961'), 'Istanbul': ('40.9552661', '29.4096963'), 'Jacarepagua': ('-22.9779874', '-43.3958898'), 'Jarama': ('40.6147065', '-3.5860519'), 'Jeddah': ('21.6380938', '39.0994433'), 'Jerez de la Frontera': ('36.7075431', '-6.0326723'), 'Kuala Lumpur': ('2.7597106', '101.7371379'), 'Kyalami': ('-25.9976867', '28.067626'), 'Las Vegas': ('36.1170295', '-115.1649455'), 'Le Castellet': ('43.2511291', '5.7894971'), 'Le Mans': ('47.951629', '0.2101078'), 'Long Beach': ('33.7640562', '-118.1887551'), 'Lusail': ('25.4904378', '51.4538568'), 'Magny-Cours': ('46.8619335', '3.1655065'), 'Melbourne': ('-37.8491401', '144.9698726'), 'Mexico City': ('19.4002574', '-99.0902792'), 'Miami': ('25.9577398', '-80.238678'), 'Monaco': ('43.7380948', '7.4260503'), 'Monsanto': ('38.7165398', '-9.2007324'), 'Mont-Tremblant': ('46.1865295', '-74.6096944'), 'Montjuïc Park': ('41.3680722', '2.1517021'), 'Montreal': ('45.50589', '-73.52411'), 'Monza': ('45.6184477', '9.2876756'), 'Mosport Park': ('44.0468166', '-78.6744209'), 'Mugello': ('43.9971945', '11.3722542'), 'New Delhi': ('28.3473368', '77.5337797'), 'Nivelles': ('50.6197164', '4.3277699'), 'Nürburgring': ('50.3292676', '6.942535'), 'Österreichring': ('47.22244', '14.7595'), 'Pedralbes': ('41.3881241', '2.1173237'), 'Pescara': ('42.4773755', '14.1548578'), 'Phoenix': ('33.44701', '-112.07681'), 'Portimão': ('37.2288843', '-8.627678'), 'Porto': ('41.1685927', '-8.6786295'), 'Reims': ('49.2583768', '3.9230837'), 'Riverside': ('33.93438', '-117.27276'), 'Rouen-les-Essarts': ('49.3333869', '1.0022022'), 'Sakhir': ('26.0303897', '50.513543'), 'Sebring': ('27.4548527', '-81.3513999'), 'Shanghai': ('31.341322', '121.21911'), 'Silverstone': ('52.07159', '-1.01615'), 'Singapore': ('1.2875346', '103.8554768'), 'Sochi': ('43.4067237', '39.9569962'), 'Spa-Francorchamps': ('50.4386283', '5.9666064'), 'Spielberg': ('47.2235862', '14.7555404'), 'Suzuka': ('34.8431556', '136.5266977'), 'Valencia': ('39.458529', '-0.330191'), 'Watkins Glen': ('42.336931', '-76.924553'), 'Yas Marina': ('24.4717208', '54.6018358'), 'Yeongam': ('34.7372903', '126.4123532'), 'Zandvoort': ('52.3878911', '4.5430609'), 'Zeltweg': ('47.200012', '14.741163'), 'Zolder': ('50.9900265', '5.254855')}    
     else:
         mappings = {}
@@ -3536,19 +3537,21 @@ for season in seasons[index:]:
         #break #To see whether the f1.com data will be executed now 🚫✔️
         open_url(f"https://www.statsf1.com{grandprix['href']}")
         raceinfo = soup.find('div', class_ = 'border-top')
+        soup_bypass = soup
         race_info = parse_race_info(str(raceinfo), theneeded)
         if race_info['track_name'] in mappings.keys():
             race_info['latitude'], race_info['longitude'] = mappings[race_info['track_name']]
             #If this is being updated, not reset, and this start off from the last grand prix, then we check if there are new circuit layouts for the circuit since the last grand prix, and if there are, we add them to the database.
-            if race_info['race_number'] > last_grandprix_id > 1149: 
+            if race_info['race_number'] > last_grandprix_id > 1150: 
                 #temporary solution. 1149 is the 2025 Abu Dhabi Grand Prix, which is the last grand prix in the database currently, 
                 #so if the last grand prix id is greater than 1149, it means we are updating and not resetting, 
                 # and we can check for new circuit layouts since the last grand prix.
                 open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")  
+                lat, lng = mappings[race_info['track_name']]
                 circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
                 cur.execute ("SELECT CircuitVersion FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ?", (race_info['latitude'], race_info['longitude']))
                 existing_versions = cur.fetchall()
-                existing_version_numbers = [v[0] for v in existing_versions]
+                existing_version_numbers = [int(v[0]) for v in existing_versions]
                 print(f"Processing circuit: {race_info['track_name']}, existing versions: {existing_version_numbers}")
                 for layoutdiv in circuitlayoutdivs:
                     circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
@@ -3562,6 +3565,8 @@ for season in seasons[index:]:
                         cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?)", (lat, lng, json.dumps(dates), version, t, circuit_text))
                         cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                         circuitlayoutid = cur.fetchone()[0]
+                    else:
+                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version))
         else:
             open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")
             a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
@@ -3587,7 +3592,7 @@ for season in seasons[index:]:
         #print("Race Info:", race_info)        
         ##fi.write(raceinfo.prettify())
         #Finds all the links for the grand prix: race entrants, results, qualifying, fastest laps, lap by lap, etc.
-        divs = soup.find('div', class_ = 'GPlink')
+        divs = soup_bypass.find('div', class_ = 'GPlink')
         soup = BeautifulSoup(str(divs), 'html.parser')
         grandprixlinks = soup.find_all('a')
         ##DONT GIVE JUST THE HREF, GIVE THE WHOLE A TAG

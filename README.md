@@ -51,7 +51,7 @@ OR
 pip install gdown 
 python download_db.py
 ```
-**Last updated: 2026 Chinese Grand Prix**
+**Last updated: 2026 Japanese Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -240,7 +240,8 @@ This will remove all races, results, and standings for that year while keeping t
    - **FirstGrandPrix**: Name of the first GP held on this layout. _TEXT_
    - **LastGrandPrix**: Name of the last GP held on this layout. _TEXT_
    - **GrandPrixCount**: Number of GPs held on this specific layout. _INTEGER DEFAULT 0_
-   - **GrandPrixDates**: JSON list of all race dates held on this layout. _TEXT_
+   - **GrandPrixDates**: JSON list of all race dates held on this layout, used for mapping a circuit layout to a Grand Prix.  This is Adelaide, for example:
+   ```["19851103", "19861026", "19871115", "19881113", "19891105", "19901104", "19911103", "19921108", "19931107", "19941113", "19951112"]``` _TEXT_
    - **SVG**: SVG path data for the track layout. _TEXT_
    - **CircuitChanges**: Description of changes from the previous version. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
