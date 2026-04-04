@@ -3,7 +3,7 @@ import sys
 
 def delete_season(year):
     try:
-        conn = sqlite3.connect("py/sessionresults.db")
+        conn = sqlite3.connect("sessionresults.db")
         cursor = conn.cursor()
         
         # Check if season exists

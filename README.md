@@ -60,6 +60,55 @@ pip install beautifulsoup4
 python writedb.py
 ```
 
+## Update race reports only:
+If you only want to refresh race reports in the `RaceReports` table, you can use:
+```bash
+python writedb.py --updateracereport
+```
+It must be noted that the Wikipedia REST API only supports 500 requests per hour so you might hit rate limits.
+
+To update race reports for a single season:
+```bash
+python writedb.py --updateracereport 2025
+```
+
+or:
+```bash
+python writedb.py --updateracereport season 2025
+```
+
+To update race reports from a season onward:
+```bash
+python writedb.py --updateracereport from 2025
+```
+
+or:
+```bash
+python writedb.py --updateracereport from season 2025
+```
+
+To update just one race report:
+```bash
+python writedb.py --updateracereport "2026 Japanese Grand Prix"
+```
+
+or:
+```bash
+python writedb.py --updateracereport race "2026 Japanese Grand Prix"
+```
+
+To update race reports from a specific race onward:
+```bash
+python writedb.py --updateracereport from "2026 Japanese Grand Prix"
+```
+
+or:
+```bash
+python writedb.py --updateracereport from race "2026 Japanese Grand Prix"
+```
+
+Race names are matched case-insensitively. This command updates only the `RaceReports` table and does not run the full database update flow.
+
 ## Reset/initialise the database:
 If, for whatever reason, you want to wipe out all the data in the database or you want to create the database with all the tables and columns, run this command:
 ```bash
@@ -75,6 +124,10 @@ This will remove all races, results, and standings for that year while keeping t
 
 
 ## Tables
+
+#### Note: 
+- For boolean values, SQLite takes `1` to be `true` and `0` to be `false`. `true` and `false` used here refers to `1` and `0`.
+- "Entries" used here refers to a driver being on the entry list for a Grand Prix, even if the driver did not take part in any of the sessions, it gets counted as an "entry" for the driver, the constructor, the team, the engine make, the engine model, the chassis, and the tyre supplier.
 
 1. ### Seasons
    This table contains a set of all seasons in F1, from 1950 to the present day.  
@@ -204,15 +257,15 @@ This will remove all races, results, and standings for that year while keeping t
    For seasons where refuelling was allowed, the value would be "authorized". For seasons where refuelling was not allowed, the value would be "forbidden".
    - **MaxFuelConsumption**: Maximum fuel consumption. _TEXT_
 
-   For seasons where there was no limit, the value would be "free". The values can also range from "200 litres" to "free (naturally aspirated) or 195 litres (supercharged)" to "100 kg and 100 kg/hour". In the last example, the first part ("100 kg") shows the fuel tank capacity (the maximum amount of fuel consumed per race) annd the second part ("100 kg/hour") shows the fuel flow limit.
-   - **TotalGrandPrix**: Total number of World Championship Grands Prix held up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalDrivers**: Total number of drivers to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalConstructors**: Total number of constructors to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalEngines**: Total number of engine manufacturers to have powered a World Championship Grand Prix entry up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalTeams**: Total number of teams to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalEngineModels**: Total number of engine models used in World Championship Grands Prix up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalChassis**: Total number of chassis to have entered a World Championship Grand Prix up to and including this season. _INTEGER DEFAULT 0_
-   - **TotalNationalities**: Total number of nationalities represented by drivers up to and including this season. _INTEGER DEFAULT 0_
+   For seasons where there was no limit, the value would be "free". The values can also range from "200 litres" to "free (naturally aspirated) or 195 litres (supercharged)" to "100 kg and 100 kg/hour". In the last example, the first part ("100 kg") shows the fuel tank capacity (the maximum amount of fuel consumed per race) annd the second part ("100 kg/hour") shows the fuel flow limit. For the 2026 season, it is "3000 MJ/hour".
+   - **TotalGrandPrix**: Total number of World Championship Grands Prix held in that season. _INTEGER DEFAULT 0_
+   - **TotalDrivers**: Total number of drivers to have entered a World Championship Grand Prix in that season. _INTEGER DEFAULT 0_
+   - **TotalConstructors**: Total number of constructors to have entered a World Championship Grand Prix in that season. _INTEGER DEFAULT 0_
+   - **TotalEngines**: Total number of engine manufacturers to have powered a World Championship Grand Prix entry in that season. _INTEGER DEFAULT 0_
+   - **TotalTeams**: Total number of teams to have entered a World Championship Grand Prix in that season. _INTEGER DEFAULT 0_
+   - **TotalEngineModels**: Total number of engine models used in World Championship Grands Prix in that season. _INTEGER DEFAULT 0_
+   - **TotalChassis**: Total number of chassis to have entered a World Championship Grand Prix in that season. _INTEGER DEFAULT 0_
+   - **TotalNationalities**: Total number of nationalities represented by drivers in that season. _INTEGER DEFAULT 0_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 2. ### Circuits
@@ -243,7 +296,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **GrandPrixDates**: JSON list of all race dates held on this layout, used for mapping a circuit layout to a Grand Prix.  This is Adelaide, for example:
    ```["19851103", "19861026", "19871115", "19881113", "19891105", "19901104", "19911103", "19921108", "19931107", "19941113", "19951112"]``` _TEXT_
    - **SVG**: SVG path data for the track layout. _TEXT_
-   - **CircuitChanges**: Description of changes from the previous version. _TEXT_
+   - **CircuitChanges**: Description of changes from the previous version of that circuit. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
@@ -266,8 +319,10 @@ This will remove all races, results, and standings for that year while keeping t
    - **CircuitLayoutID**: Foreign key to CircuitLayouts. _INTEGER_
    - **PoleSide**: Side of the track the pole position is on. _TEXT_
    - **GridFormation**: The formation of the starting grid (e.g. 2-2, 3-2-3). _TEXT_
-
-   If it is a sprint weekend, the value is ```true```, if it is not, the value is ```false```.
+   For example, here's the GridFormation for the 1950 Italian Grand Prix:
+   ```4-4-4-4-4-4-4-4-4-4-4-4-3-3```
+   - **SprintWeekend** Whether the weekend was a sprint weekend. _BOOLEAN_
+   If it is a sprint weekend, the value is `true`, if it is not, the value is `false`.
    - **CircuitID**: Foreign key to Circuits. _INTEGER_
    - **EntrantsNotes**: Notes about the entrants to the race. _TEXT_
    - **QualifyingNotes**: Notes about qualifying. _TEXT_
@@ -332,10 +387,13 @@ This will remove all races, results, and standings for that year while keeping t
    - **BestChampionshipPosition**: Best championship position of that driver. _INTEGER_
    - **FirstGrandPrix**: First Grand Prix of that driver. _TEXT_
    - **LastGrandPrix**: Last Grand Prix of that driver. _TEXT_
+
+   FirstGrandPrix and LastGrandPrix does not count FP1 appearances or drivers on the entry list who did not participate in any session. Non-qualifications do count, though.
    - **NationalityID**: Foreign key to Nationalities. _INTEGER_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **indy500only**: Whether this driver only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 7. ### Teams
    This table contains all teams that have entered a Grand Prix. A constructor and a team are two very different things. A constructor is an entity that constructs a chassis for Formula One, while a team can also include private entries from people who don't construct a chassis. In a more modern sense, a constructor is just the chassis name (i.e, Mercedes), while a team also includes the sponsor names (i.e, Mercedes AMG Petronas Formula One Team). The team names are according to the entry list for that race.
@@ -371,6 +429,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **indy500only**: Whether this team only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 8. ### Constructors
    This table contains all constructors who have made a chassis that entered a Grand Prix.  
@@ -407,6 +466,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **indy500only**: Whether this constructor only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 9. ### Engines
    This table contains all engine manufacturers to power an entry in a Grand Prix. Rebadged engines like Acer, Mecachrome, etc. are also included.
@@ -443,6 +503,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **indy500only**: Whether this engine manufacturer only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 10. ### Tyres
    This table contains all tyre manufacturers that have provided tyres to an entry.  
@@ -477,6 +538,7 @@ This will remove all races, results, and standings for that year while keeping t
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **indy500only**: Whether this tyre manufacturer only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 11. ### Chassis
     This table contains all chassis to enter a race in Formula One (e.g, the Lotus 72).  
@@ -514,6 +576,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+    - **indy500only**: Whether this chassis only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 12. ### EngineModels
     This table contains all engine models used in F1 (e.g, the Cosworth DFV).  
@@ -552,11 +615,15 @@ This will remove all races, results, and standings for that year while keeping t
     - **FirstGrandPrixID**: Foreign key to GrandsPrix of that engine manufacturer. _INTEGER_
     - **LastGrandPrixID**: Foreign key to GrandsPrix of that engine manufacturer. _INTEGER_
     - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+    - **indy500only**: Whether this engine model only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
 13. ### GrandPrixResults
     This table contains all race entrants for each Grand Prix, with all session results and penalties. It then has all the results for each session that driver competed in. For shared cars, there are separate entries for each driver but it has the _same_ car number. 
     
-    Q1 and Q2 can mean different things over different qualifying regulations. From 1950 till 1995, there were two different qualifying sessions, one on Friday (Q1), and one on Saturday (Q2). The best time from both sessions for each driver was counted towards the overall qualifying. In 2003 and 2004, during the first qualifying session (Q1), all the drivers set one lap in championship order, with the last going first and first going last. Then, on the second qualifying session (Q2), the drivers went on another lap, with the last on the first session going first, and the first going last. Then, for the first six races in 2005, there were two different sessions; one on low fuel (Q1), and one on race fuel(Q2). Then the two times would be aggregated to set the overall qualifying times. From 2006, the slowest drivers were eliminated in Q1 and Q2, now just part of qualifying, not two separate sessions. 
+    Q1 and Q2 can mean different things over different qualifying regulations. From 1950 till 1995, there were two different qualifying sessions, one on Friday (Q1), and one on Saturday (Q2). The best time from both sessions for each driver was counted towards the overall qualifying. In 2003 and 2004, during the first qualifying session (Q1), all the drivers set one lap in championship order, with the last going first and first going last. Then, on the second qualifying session (Q2), the drivers went on another lap, with the last on the first session going first, and the first going last. Then, for the first six races in 2005, there were two different sessions; one on low fuel (Q1), and one on race fuel (Q2). Then the two times would be aggregated to set the overall qualifying times. From 2006, the slowest drivers were eliminated in Q1 and Q2, now just part of qualifying, not two separate sessions. 
+
+    Pre-qualifying in Formula 1 was an additional elimination session used mainly between 1987 and 1992 to manage situations where more cars entered a race weekend than the maximum allowed grid of 26. During this period, many small and underfunded teams joined the sport, leading to entry lists of over 30 cars. To control this, the slowest teams—usually determined by their previous results—had to participate in a Friday morning pre-qualifying session, where only a few of the fastest drivers (typically four) would advance to the main qualifying rounds, while the rest were eliminated from the weekend entirely. This system was often harsh, as some teams traveled long distances only to complete a handful of laps before being sent home. A much earlier example of a similar issue can be seen at the 1965 South African Grand Prix held at Kyalami Circuit, where a large number of local and private entrants led to an overcrowded field. To pre-qualify, a driver had to set a lap time below 1:37.0, unlike later pre-qualifying sessions where only a few of the fastest drivers would pre-qualify. For this session, the `prequalifyingtime` is given as "+1:37.0" or "-1:37.0". Between the late-1970s and the mid-1980s, pre-qualifying occured in a few races where there were too many entrants.
+
 
     We also have data for practice sessions. This must not be confused with qualifying being called practice previously. There were up to four practice sessions in previous years, with the pre-race warm ups as well. There have been only two practice sessions in some years, and in Sprint weekends we only have one. We currently have three practice sessions in normal weekends.
 
@@ -835,6 +902,7 @@ This will remove all races, results, and standings for that year while keeping t
     **Columns:**
     - **ID**: Unique nationality ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
     - **Nationality**: Nationality. _TEXT UNIQUE_
+   FirstGrandPrix and LastGrandPrix does not count FP1 appearances or drivers on the entry list who did not participate in any session. Non-qualifications do count, though.    
     - **FirstGrandPrix**: First Grand Prix of that nationality. _TEXT_
     - **LastGrandPrix**: Last Grand Prix of that nationality. _TEXT_
     - **DriverCount**: Number of drivers of that nationality. _INTEGER DEFAULT 0_
@@ -861,7 +929,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **BestQualifyingPosition**: Best qualifying position of that nationality. _INTEGER_
     - **BestRacePosition**: Best race position of that nationality. _INTEGER_
     - **BestSprintPosition**: Best sprint position of that nationality. _INTEGER_
-    - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_
+    - **BestSprintQualifyingPosition**: Best sprint qualifying position. _INTEGER_    
     - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **FirstDriver**: First driver who represented this nationality. _TEXT_
@@ -872,6 +940,7 @@ This will remove all races, results, and standings for that year while keeping t
 
 21. ### RaceReports
     This table contains the full race reports for every Grand Prix.
+    Reports are stored as markdown-style text and may include headings and bulleted lists.
     **Columns:**
     - **ID**: Primary key, matching the Grand Prix ID. _INTEGER PRIMARY KEY_
     - **GrandPrixName**: Name of the Grand Prix. _TEXT UNIQUE_
@@ -880,19 +949,22 @@ This will remove all races, results, and standings for that year while keeping t
 ## Roadmap:
 We are working on adding more features to the database to make it even more comprehensive. Some of the features and/or changes we want to add in the future include:
 - Add robust OCR detection for the circuit layouts. Currently, my attempt of the OCR detection is not very accurate as it includes false positives, false negatives, and incorrect detection. Once a robust OCR detection is added, we can add corner names and numbers to the circuit layout SVGs.
-- Check the viability of adding telemetry data and add if viable, including mini-sectors.
-- Make `writedb.py` more efficient. Currently a lot of the code is O(n^2) and can be optimised.
+- Check the viability of adding telemetry data and add if viable, including mini-sectors. Telemetry data can be added in a parquet file to reduce file size and bloating of the database.
+- In seasons where telemetry is not available, there is still data for speeds at the speed trap, Intermediate 1, Intermediate 2, and Intermediate 3. We can add that if possible.
+- Add race control messages for available races.
+- Add weather data, such as temperature, precipitation, wind speed, air pressure, and so on where available using data available from `fastf1` or a historical weather API.
+- Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1.
+- Make `writedb.py` more efficient. Currently a lot of the code is O(n²) and can be optimised.
 - Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
-- Make the race report scraping better. We can add bulletted lists next, maybe.
 
 We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
 
 ## Contributing
 Contributions are welcome! If you find any data inaccuracies or want to suggest new features:
 1. Fork the repository.
-2. Create a new branch for your changes.
+2. Create a new branch for your changes. Do not work on the main branch!
 3. Submit a Pull Request with a detailed description of your updates.
-4. Ensure any schema changes are also updated in `reset.py`.
+4. Ensure any schema changes are also updated in `reset.py` and in the README.
 
 Even if you don't have any code to contribute, you can still help by suggesting new features or contributing to the Wikipedia pages of race reports. Currently, a lot of pages of the race reports don't have enough data showing what happened. You can change that by editing and contributing to the Wikipedia pages of race reports. This helps both the F1 community as well as this database.
 

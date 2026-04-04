@@ -165,7 +165,8 @@ cursor.execute('''CREATE TABLE Drivers (
     NationalityID INTEGER,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (NationalityID) REFERENCES Nationalities(ID),
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
@@ -201,7 +202,8 @@ cursor.execute('''CREATE TABLE Teams (
     BestSprintQualifyingPosition INTEGER,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
 )''')
@@ -238,7 +240,8 @@ cursor.execute('''CREATE TABLE Constructors (
     LastGrandPrix TEXT,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
 )''')
@@ -274,7 +277,8 @@ cursor.execute('''CREATE TABLE Engines (
     LastGrandPrix TEXT,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
 )''')
@@ -309,6 +313,7 @@ cursor.execute('''CREATE TABLE Tyres (
     LastGrandPrix TEXT,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
+    indy500only BOOLEAN DEFAULT 0,
     needstatsupdate BOOLEAN DEFAULT 0,
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
@@ -346,7 +351,8 @@ cursor.execute('''CREATE TABLE Chassis (
     ConstructorID INTEGER,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (ConstructorID) REFERENCES Constructors(ID),
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
@@ -384,7 +390,8 @@ cursor.execute('''CREATE TABLE EngineModels (
     EngineMakeID INTEGER,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
-    needstatsupdate BOOLEAN DEFAULT 0,
+    needstatsupdate BOOLEAN DEFAULT 1,
+    indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (EngineMakeID) REFERENCES Engines(ID),
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)

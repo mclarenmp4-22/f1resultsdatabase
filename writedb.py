@@ -6,6 +6,7 @@ import time
 import re
 import datetime
 import json
+import sys
 import unicodedata
 from decimal import Decimal
 from collections import defaultdict, Counter
@@ -1316,59 +1317,90 @@ def fetch_race_report(gp):
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1. FIX SPACING: Inject spaces around inline tags so words don't merge
-    for tag in soup.find_all(["a", "span", "b", "i"]):
-        tag.insert_before(" ")
-        tag.insert_after(" ")
-
-    # 2. REMOVE CITATIONS: Remove all <sup> tags (the [1], [2] markers)
+    # Remove citation markers and other inline noise before extracting text.
     for ref in soup.find_all("sup"):
         ref.decompose()
 
+    for noisy_tag in soup.find_all(["style", "script", "math"]):
+        noisy_tag.decompose()
+
+    def normalize_report_text(text):
+        if not text:
+            return ""
+        text = text.replace("\xa0", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        # Remove spaces that appear before punctuation after HTML flattening.
+        text = re.sub(r"\s+([,.;:!?%)\]])", r"\1", text)
+        text = re.sub(r"([(\[])\s+", r"\1", text)
+        # Keep dash-separated phrases readable without introducing duplicate spaces.
+        text = re.sub(r"\s*-\s*", " - ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text.strip()
+
+    def element_text(elem):
+        return normalize_report_text(elem.get_text(" ", strip=True))
+
+    ignored_section_terms = (
+        "reference", "citation", "footnote",
+        "external links", "see also", "bibliography", "further reading"
+    )
 
     temp_output = []
+    skip_section = False
 
-    # 3. SCRAPE: Iterate through the entire body for headers and paragraphs
-    # Removing the "Section 0" filter allows us to see the whole article
-    for elem in soup.find_all(["h2", "h3", "h4", "p"]):
-        
-        # Skip content inside tables, infoboxes, or references
-        if elem.find_parent(["table", "aside", "cite", "footer"]):
+    for elem in soup.find_all(["h2", "h3", "h4", "p", "ul", "ol", "li"]):
+        if elem.find_parent(["table", "aside", "cite", "footer", "nav"]):
             continue
 
         if elem.name.startswith("h"):
-            header_text = elem.get_text(strip=True)
-            
-            level = "##" if elem.name == "h2" else "###"
-            temp_output.append({"type": "header", "content": f"\n{level} {header_text}\n"})
-        
-        elif elem.name == "p":
-            # Clean up extra whitespace from the space-injection step
-            text = " ".join(elem.get_text().split())
-            if text:
-                temp_output.append({"type": "para", "content": text + "\n"})
+            header_text = element_text(elem)
+            if not header_text:
+                continue
 
-    # 4. FILTER EMPTY HEADERS: Only keep a header if text follows it
+            header_lower = header_text.lower()
+            skip_section = any(term in header_lower for term in ignored_section_terms)
+            if skip_section:
+                continue
+
+            level = "##" if elem.name == "h2" else "###"
+            temp_output.append({"type": "header", "content": f"{level} {header_text}"})
+
+        elif skip_section:
+            continue
+
+        elif elem.name == "p":
+            text = element_text(elem)
+            if text:
+                temp_output.append({"type": "para", "content": text})
+
+        elif elem.name in {"ul", "ol"}:
+            list_items = []
+            for li in elem.find_all("li", recursive=False):
+                text = element_text(li)
+                if text:
+                    list_items.append(f"- {text}")
+            if list_items:
+                temp_output.append({"type": "list", "content": "\n".join(list_items)})
+
     final_content = []
     for i, item in enumerate(temp_output):
         if item["type"] == "header":
-            has_text_below = False
+            has_content_below = False
             for next_item in temp_output[i+1:]:
-                if next_item["type"] == "para":
-                    has_text_below = True
+                if next_item["type"] in {"para", "list"}:
+                    has_content_below = True
                     break
-                if next_item["type"] == "header" and next_item["content"].startswith("\n## "):
-                    # Stop looking if we hit a new major H2 section
+                if next_item["type"] == "header" and next_item["content"].startswith("## "):
                     break
-            if has_text_below:
+            if has_content_below:
                 final_content.append(item["content"])
         else:
+            if final_content and final_content[-1] == item["content"]:
+                continue
             final_content.append(item["content"])
 
-    content = "\n".join(final_content).strip()
-    
-    # Final cleanup of double spaces
-    content = re.sub(r' +', ' ', content)
+    content = "\n\n".join(block for block in final_content if block).strip()
+    content = re.sub(r"\n{3,}", "\n\n", content)
 
     if not content:
         raise ValueError(f"No usable content extracted for {title}")
@@ -1382,6 +1414,121 @@ def tts_to_normal(tts):
     minutes = int(tts / 60)
     seconds = float(Decimal(str(tts % 60)).quantize(Decimal('0.001')))
     return f"{minutes}:{seconds:06.3f}"
+
+
+def get_race_report_update_rows(target=None):
+    query = """
+        SELECT RR.ID, COALESCE(G.GrandPrixName, RR.GrandPrixName), G.Season
+        FROM RaceReports RR
+        LEFT JOIN GrandsPrix G ON G.ID = RR.ID
+    """
+    params = ()
+
+    if target is None:
+        query += " ORDER BY RR.ID"
+    else:
+        target = str(target).strip()
+        target_lower = target.lower()
+        from_mode = False
+
+        if target_lower.startswith("from "):
+            target = target[5:].strip()
+            target_lower = target.lower()
+            from_mode = True
+
+        if target_lower.startswith("season "):
+            season_value = target[7:].strip()
+            operator = ">=" if from_mode else "="
+            query += f" WHERE G.Season {operator} ? ORDER BY RR.ID"
+            params = (int(season_value),)
+        elif target_lower.startswith("race "):
+            race_name = target[5:].strip()
+            if from_mode:
+                cur.execute(
+                    "SELECT ID, GrandPrixName FROM GrandsPrix WHERE LOWER(GrandPrixName) = ?",
+                    (race_name.lower(),)
+                )
+                race_row = cur.fetchone()
+                if race_row is None:
+                    raise ValueError(f"No race report found for race '{race_name}'.")
+                race_id, _canonical_name = race_row
+                query += " WHERE RR.ID >= ? ORDER BY RR.ID"
+                params = (race_id,)
+            else:
+                query += """
+                    WHERE LOWER(COALESCE(G.GrandPrixName, RR.GrandPrixName)) = ?
+                    ORDER BY RR.ID
+                """
+                params = (race_name.lower(),)
+        elif target.isdigit():
+            operator = ">=" if from_mode else "="
+            query += f" WHERE G.Season {operator} ? ORDER BY RR.ID"
+            params = (int(target),)
+        else:
+            if from_mode:
+                cur.execute(
+                    "SELECT ID, GrandPrixName FROM GrandsPrix WHERE LOWER(GrandPrixName) = ?",
+                    (target.lower(),)
+                )
+                race_row = cur.fetchone()
+                if race_row is None:
+                    raise ValueError(f"No race report found for race '{target}'.")
+                race_id, _canonical_name = race_row
+                query += " WHERE RR.ID >= ? ORDER BY RR.ID"
+                params = (race_id,)
+            else:
+                query += """
+                    WHERE LOWER(COALESCE(G.GrandPrixName, RR.GrandPrixName)) = ?
+                    ORDER BY RR.ID
+                """
+                params = (target.lower(),)
+
+    cur.execute(query, params)
+    return cur.fetchall()
+
+
+def update_race_reports(target=None):
+    rows = get_race_report_update_rows(target)
+
+    if not rows:
+        if target is None:
+            print("No race reports found to update.")
+        elif str(target).strip().isdigit() or str(target).strip().lower().startswith("season "):
+            print(f"No race reports found for season {target}.")
+        else:
+            print(f"No race report found for race '{target}'.")
+        return
+
+    if target is None:
+        scope = f"{len(rows)} races"
+    elif str(target).strip().lower().startswith("from "):
+        scope = f"{len(rows)} races from {str(target).strip()[5:]}"
+    elif str(target).strip().isdigit() or str(target).strip().lower().startswith("season "):
+        scope = f"{len(rows)} races in season {target}"
+    else:
+        scope = f"{len(rows)} race(s) matching {target}"
+
+    print(f"Updating race reports for {scope}...")
+    updated = 0
+    failed = []
+
+    for race_id, gp_name, _season in rows:
+        report = fetch_race_report(gp_name)
+        cur.execute(
+            "UPDATE RaceReports SET GrandPrixName = ?, RaceReport = ? WHERE ID = ?",
+            (gp_name, report, race_id)
+        )
+        updated += 1
+        print(f"[{updated}/{len(rows)}] Updated {gp_name}")
+        if updated % 25 == 0:
+            conn.commit()
+
+    conn.commit()
+    print(f"Race report update complete. Updated {updated}/{len(rows)} races.")
+    if failed:
+        print(f"{len(failed)} races failed:")
+        for race_id, gp_name, error in failed:
+            print(f"- {race_id} {gp_name}: {error}")
 
 def assign_qualifying_positions_by_session(entrants, session_num):
     """
@@ -3318,6 +3465,15 @@ def parsenotes (links):
                 notes["SprintNotes"] = notesdiv.text.strip() if notesdiv else ''
     return notes.copy()
 
+if "--updateracereport" in sys.argv:
+    updaterace_index = sys.argv.index("--updateracereport")
+    updaterace_target = " ".join(sys.argv[updaterace_index + 1:]).strip() or None
+    update_race_reports(updaterace_target)
+    print("Closing database connection...")
+    conn.close()
+    raise SystemExit(0)
+
+
 months = {
     'Jan': 1,
     'Feb': 2,
@@ -3776,15 +3932,24 @@ for season in seasons[index:]:
                 else:
                     driver_name_for_url = driver_name_clean
                 nationality, birthdate = fetch_driver_info(driver_name_for_url)
-                cur.execute("INSERT OR IGNORE INTO Nationalities (Nationality, FirstGrandPrix, FirstGrandPrixID) VALUES (?, ?, ?)", (nationality, gp, grandprix_id))
+                first_grandprix = gp if not result["substituteorthirddriver"] else None
+                first_grandprix_id = grandprix_id if not result["substituteorthirddriver"] else None                
+                cur.execute("INSERT OR IGNORE INTO Nationalities (Nationality, FirstGrandPrix, FirstGrandPrixID) VALUES (?, ?, ?)", (nationality, first_grandprix, first_grandprix_id))
                 cur.execute("SELECT ID FROM Nationalities WHERE Nationality = ?", (nationality,))
-                nationality_id = cur.fetchone()[0]                      
+                nationality_id = cur.fetchone()[0]                     
                 # Insert into drivers table
                 cur.execute("""
                     INSERT INTO Drivers (name, nationality, birthdate, FirstGrandPrix, FirstGrandPrixID, NationalityID)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (result['driver'], nationality, birthdate, gp, grandprix_id, nationality_id))          
+                """, (result['driver'], nationality, birthdate, first_grandprix, first_grandprix_id, nationality_id))          
                 cur.execute('UPDATE Nationalities SET DriverCount = DriverCount + 1 WHERE ID = ?', (nationality_id,))
+            else:
+                driver_firstgrandprix = cur.execute("SELECT FirstGrandPrix FROM Drivers WHERE Name = ?", (result['driver'],)).fetchone()[0]
+                if driver_firstgrandprix is None and not result["substituteorthirddriver"]:
+                    cur.execute("UPDATE Drivers SET FirstGrandPrix = ?, FirstGrandPrixID = ? WHERE Name = ?", (gp, grandprix_id, result['driver']))
+                nationality_firstgrandprix = cur.execute("SELECT FirstGrandPrix FROM Nationalities WHERE ID = (SELECT NationalityID FROM Drivers WHERE Name = ?)", (result['driver'],)).fetchone()[0]
+                if nationality_firstgrandprix is None and not result["substituteorthirddriver"]:
+                    cur.execute("UPDATE Nationalities SET FirstGrandPrix = ?, FirstGrandPrixID = ? WHERE ID = (SELECT NationalityID FROM Drivers WHERE Name = ?)", (gp, grandprix_id, result['driver']))
             cur.execute("SELECT ID FROM Drivers WHERE Name = ?", (result['driver'],))
             driver_id = cur.fetchone()[0]
             #print (result['driver'], driver_id)
@@ -3806,7 +3971,8 @@ for season in seasons[index:]:
             nationality = cur.fetchone()[0]
             cur.execute("SELECT ID FROM Nationalities WHERE Nationality = ?", (nationality,))
             nationality_id = cur.fetchone()[0] 
-            cur.execute("UPDATE Nationalities SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, nationality_id))
+            if not result["substituteorthirddriver"]:
+                cur.execute("UPDATE Nationalities SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, nationality_id))
             cur.execute("UPDATE Nationalities SET needstatsupdate = 1 WHERE ID = ?", (nationality_id,))
             driverids[result['driver']] = driver_id
             teamids[result['team']] = team_id
@@ -3844,7 +4010,8 @@ for season in seasons[index:]:
                 INSERT INTO GrandPrixResults ({columns})
                 VALUES ({placeholders})
             ''', values)
-            cur.execute("UPDATE Drivers SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, driver_id)) 
+            if not result['substituteorthirddriver']:
+                cur.execute("UPDATE Drivers SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, driver_id)) 
             cur.execute("UPDATE Teams SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, team_id))
             cur.execute("UPDATE Constructors SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, constructor_id))
             cur.execute("UPDATE Chassis SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ChassisName = ? AND ConstructorID = ?", (gp, grandprix_id, result['chassis'], constructor_id))
@@ -4424,6 +4591,7 @@ cur.execute("UPDATE Drivers SET BestRacePosition = (SELECT MIN(raceposition) FRO
 cur.execute("UPDATE Drivers SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND sprintposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND sprint_qualifyingposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET BestChampionshipPosition = (SELECT MIN(Position) FROM DriversChampionship WHERE DriversChampionship.driverid = Drivers.ID AND Position IS NOT NULL AND Drivers.needstatsupdate = 1)")
+cur.execute("UPDATE Drivers SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.driverid = Drivers.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID) THEN 1 ELSE 0 END WHERE Drivers.needstatsupdate = 1")
 
 print("Drivers stats updated.")
 
@@ -4514,6 +4682,7 @@ cur.execute("UPDATE Constructors SET BestRacePosition = (SELECT MIN(raceposition
 cur.execute("UPDATE Constructors SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprintposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprint_qualifyingposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET BestChampionshipPosition = (SELECT MIN(Position) FROM ConstructorsChampionship WHERE ConstructorsChampionship.constructorid = Constructors.ID AND Position IS NOT NULL AND Constructors.needstatsupdate = 1)")
+cur.execute("UPDATE Constructors SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID) THEN 1 ELSE 0 END WHERE Constructors.needstatsupdate = 1")
 print("Constructors stats updated.")
 
 #exact same thing for engines as constructors
@@ -4539,6 +4708,7 @@ cur.execute("UPDATE Engines SET BestQualifyingPosition = (SELECT MIN(qualifyingp
 cur.execute("UPDATE Engines SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND raceposition IS NOT NULL AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprintposition IS NOT NULL AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprint_qualifyingposition IS NOT NULL AND Engines.needstatsupdate = 1)")
+cur.execute("UPDATE Engines SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.engineid = Engines.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID) THEN 1 ELSE 0 END WHERE Engines.needstatsupdate = 1")
 print("Engines stats updated.")
 
 #chassis now:
@@ -4563,6 +4733,7 @@ cur.execute("UPDATE Chassis SET BestQualifyingPosition = (SELECT MIN(qualifyingp
 cur.execute("UPDATE Chassis SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND raceposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprintposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprint_qualifyingposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
+cur.execute("UPDATE Chassis SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID) THEN 1 ELSE 0 END WHERE Chassis.needstatsupdate = 1")
 print("Chassis stats updated.")
 
 #engine models now:
@@ -4587,6 +4758,7 @@ cur.execute("UPDATE EngineModels SET BestQualifyingPosition = (SELECT MIN(qualif
 cur.execute("UPDATE EngineModels SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND raceposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprintposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprint_qualifyingposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
+cur.execute("UPDATE EngineModels SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID) THEN 1 ELSE 0 END WHERE EngineModels.needstatsupdate = 1")
 print("EngineModels stats updated.")
 
 #tyres now:
@@ -4611,6 +4783,7 @@ cur.execute("UPDATE Tyres SET BestQualifyingPosition = (SELECT MIN(qualifyingpos
 cur.execute("UPDATE Tyres SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND raceposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
 cur.execute("UPDATE Tyres SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND sprintposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
 cur.execute("UPDATE Tyres SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND sprint_qualifyingposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
+cur.execute("UPDATE Tyres SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID) THEN 1 ELSE 0 END WHERE Tyres.needstatsupdate = 1")
 print("Tyres stats updated.")
 
 #teams too:
@@ -4635,6 +4808,7 @@ cur.execute("UPDATE Teams SET BestQualifyingPosition = (SELECT MIN(qualifyingpos
 cur.execute("UPDATE Teams SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND raceposition IS NOT NULL AND Teams.needstatsupdate = 1)")
 cur.execute("UPDATE Teams SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND sprintposition IS NOT NULL AND Teams.needstatsupdate = 1)")
 cur.execute("UPDATE Teams SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND sprint_qualifyingposition IS NOT NULL AND Teams.needstatsupdate = 1)")
+cur.execute("UPDATE Teams SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.teamid = Teams.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID) THEN 1 ELSE 0 END WHERE Teams.needstatsupdate = 1")
 print("Teams stats updated.")
 
 #nationalities:
@@ -4715,6 +4889,8 @@ update_laps_led_for_component(cur, "Teams", "teamid")
 update_laps_led_for_component(cur, "Drivers", "driverid")
 update_laps_led_for_component(cur, "Nationalities", "nationalityid")
 print("GrandPrixLapsLed and SprintLapsLed stats updated.")
+
+
 
 #flip all things back to 0 now that we're done
 cur.execute("UPDATE Drivers SET needstatsupdate = 0 WHERE needstatsupdate = 1")
