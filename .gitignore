@@ -1,2 +1,4 @@
 sessionresults.db
 .venv
+compress_db.py
+/__pycache__/
