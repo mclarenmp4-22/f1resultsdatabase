@@ -40,23 +40,20 @@ This is the most comprehensive F1 database with:
 - **Race Reports**: Narrative reports for every Grand Prix, from Wikipedia.
 
 
+## Requirements:
+Install all the requirements using:
+```bash
+pip install -r requirements.txt
+```
 
 ## Download the latest version:
-To download the latest version of the database, please visit this link: [https://drive.google.com/file/d/1M3ijJIWDEGqGOw4Prx2AXFhts2cv-J1d/view](https://drive.google.com/file/d/1M3ijJIWDEGqGOw4Prx2AXFhts2cv-J1d/view)
+To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-
-OR
-
-```bash
-pip install gdown 
-python download_db.py
-```
-**Last updated: 2026 Japanese Grand Prix**
+**Last updated: 2026 Miami Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
 ```bash
-pip install beautifulsoup4
 python writedb.py
 ```
 
@@ -121,6 +118,14 @@ If you want to delete data for a single season (e.g. to re-scrape it), run:
 python deleteseason.py <year>
 ```
 This will remove all races, results, and standings for that year while keeping the rest of the database intact.
+
+## Delete a specific race:
+If you want to delete data for a single race (e.g. to re-scrape it), run:
+```bash
+python deleterace.py <race_name>
+```
+
+#### Note: This is meant to be a debugging tool only to fix bugs and does not delete all tables containing data for that specific season or Grand Prix. 
 
 
 ## Tables
@@ -816,8 +821,7 @@ This will remove all races, results, and standings for that year while keeping t
     - **Driver**: Driver name. _TEXT_
     - **Position**: Position on that lap. _INTEGER_
     - **Lap**: Lap number. _INTEGER_
-    - **Type**: Session type. For Grands Prix, the type is "grandprix", and for Sprints, the type is "sprint". We also have "practice1", "practice2", "practice3", and "qualifying" _TEXT_
-    - **SafetyCar**: Safety car/ Virtual Safety car status. `true` for Safety Car/Virtual Safety Car in force that lap, `false` otherwise. _BOOLEAN_
+    - **Session**: Name of the session. _TEXT_
     - **Time**: Lap time. Available from 1996. _TEXT_
     - **TimeInSeconds**: Lap time in seconds. _REAL_
     - **TyreCompound**: The tyre compound used on this lap (Soft, Medium, Hard, etc.). _TEXT_
@@ -825,9 +829,40 @@ This will remove all races, results, and standings for that year while keeping t
     - **Sector1Time**: Time spent in Sector 1. _REAL_
     - **Sector2Time**: Time spent in Sector 2. _REAL_
     - **Sector3Time**: Time spent in Sector 3. _REAL_
-    - **TyreAge**: Number of laps the current set of tyres has done. _INTEGER_
-    - **TrackStatus**: Condition of the track (Green, Yellow, SC, VSC, etc.). _TEXT_
+    - **TyreAge**: Number of laps the current set of tyres has done, in all sessions, not just the current session. _INTEGER_
+    - **TrackStatus**: Condition of the track (Green, Yellow, SC, VSC, etc.).  Safety Car info is available from the first ever deployment of the safety car (1973 Canadian Grand Prix), however from 2015 to 2017, if there is a safety car or virtual safety car, the track status will contain both "Safety Car" and "Virtual Safety Car" as there is no differentiation in our source data for this period. _TEXT_
     - **QualifyingSegment**: For qualifying laps, which segment (Q1, Q2, Q3, SQ1, SQ2, SQ3) it belongs to. _TEXT_
+    - **SessionLapStartTime**: The session time in which the lap was started, for example, if the lap was started 30 minutes into the session, it would be 30:00.000 _TEXT_
+    - **SessionLapStartTimeInSeconds**: Session lap start time in seconds. _REAL_
+    - **SessionLapStartTimeInDateTimeUTC**: Session lap start time in datetime in the UTC time format. _TEXT_
+    - **SessionLapEndTime**: The session time in which the lap was finished. _TEXT_
+    - **SessionLapEndTimeInSeconds**: Session lap end time in seconds _REAL_
+    - **Sector1EndSessionTime**: The session time in which sector 1 was finished. _TEXT_
+    - **Sector1EndSessionTimeInSeconds**: Sector 1 end session time in seconds. _REAL_
+    - **Sector2EndSessionTime**: The session time in which sector 2 was finished. _TEXT_
+    - **Sector2EndSessionTimeInSeconds**: Sector 2 end session time in seconds _REAL_
+    - **Sector3EndSessionTime**: The session time in which sector 3 was finished. _TEXT_
+    - **Sector3EndSessionTimeInSeconds**: Sector 3 end session time in seconds _REAL_
+    Speed Trap refers to the place on the circuit where the highest speeds in the circuit are achieved. It is generally at the end of the longest straight of the track just before the braking zone, however with the clipping in the new 2026 regulations, and to some extent even in the turbo-hybrid era of 2014-2025, the highest speed is achieved earlier in the straight because the MGU-K stops delivering power to the wheels or even starts recharging on the straight.
+
+    Intermediate 1 refers to the point on the track where Sector 1 ends and Sector 2 begins.
+
+    Intermediate 2 refers to the point on the track where Sector 2 ends and Sector 3 begins.
+
+    Speed is also measured at the finishing line, at the end of the lap, or where Sector 3 ends and Sector 1 begins.    
+    - **SpeedIntermediate1**: Speed in km/h in Intermediate 1. _REAL_
+    - **SpeedIntermediate2**: Speed in km/h in Intermediate 2. _REAL_
+    - **SpeedFinishLine**: Speed in km/h in the finish line. _REAL_
+    - **SpeedSpeedTrap**: Speed in km/h in the Speed Trap. _REAL_
+    - **PitInSessionTime**: The session time in which the driver entered the pit lane. If driver did not enter the pit lane, this will be NULL. _TEXT_
+    - **PitInSessionTimeInSeconds**: Pit in session time in seconds. _REAL_
+    - **PitOutSessionTime**: The session time in which the driver exited the pit lane. If driver did not exit the pit lane, this will be NULL. _TEXT_
+    - **PitOutSessionTimeInSeconds**: Pit out session time in seconds. _REAL_
+    - **IfDeletedLap**: `true` if the lap time was deleted, `false` otherwise. _BOOLEAN_
+    - **DeleteReason**: Reason for deleting the lap time, if it was deleted. _TEXT_
+    - **IfAccurate**: `true` if fastf1 considers the lap time accurate, `false` otherwise. _BOOLEAN_
+    - **FastF1Generated**: If the lap was generated by fastf1 or not. _BOOLEAN_
+    - **SessionID**: Foreign key to Sessions. _INTEGER_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **DriverID**: Foreign key to Drivers. _INTEGER_
 
@@ -941,19 +976,100 @@ This will remove all races, results, and standings for that year while keeping t
 21. ### RaceReports
     This table contains the full race reports for every Grand Prix.
     Reports are stored as markdown-style text and may include headings and bulleted lists.
+
     **Columns:**
-    - **ID**: Primary key, matching the Grand Prix ID. _INTEGER PRIMARY KEY_
+    - **ID**: Foreign key, matching the Grand Prix ID. _INTEGER PRIMARY KEY_
     - **GrandPrixName**: Name of the Grand Prix. _TEXT UNIQUE_
     - **RaceReport**: The full text of the race report. _TEXT_
+
+22. ### MaxSpeeds
+    This table contains the maximum speed of each driver in a particular measuring point (Speed Trap, Intermediate 1, Intermediate 2, Finishing Line) for sessions from 2006 onwards. 
+
+    **Columns:**
+    - **GrandPrixName** Name of the Grand Prix _TEXT_,
+    - **Position** Position of the driver in the measuring point _INTEGER_,
+    - **Driver** Name of the driver  _TEXT_,
+    - **Constructor** Name of the constructor _TEXT_,
+    - **Engine** Name of the engine _TEXT_,
+    - **EngineModel** Name of the engine model _TEXT_,
+    - **SessionName** Name of the session _TEXT_,
+    - **TimingPoint** The point at the circuit where the speed is measured _TEXT_,
+    - **SpeedKph** Speed in kilometers per hour _REAL_
+    - **GrandPrixID** Foreign Key to GrandsPrix _INTEGER_
+    - **SessionID** Foreign Key to Sessions _INTEGER_
+    - **DriverID** Foreign Key to Drivers _INTEGER_
+    - **ConstructorID** Foreign Key to Constructors _INTEGER_
+    - **EngineID** Foreign Key to Engines _INTEGER_
+    - **EngineModelID** Foreign Key to EngineModels  _INTEGER_
+
+23. ### RaceControlMessages
+This table contains the messages by race control. Data is available from 2018 onwards.
+
+Race control messages are sent by race control to all teams to notify of decisions and statuses of the session.
+
+**Columns**
+
+- **GrandPrixName**: Name of the Grand Prix.
+- **SessionName**: Name of the session.
+
+Every message has the following attributes:
+
+- **TimestampUTC**: Message timestamp _TEXT_
+
+- **Category** : Type of message, “Other”, “Flag”, “Drs”, “CarEvent” _TEXT_
+
+- **Message** : Content of message _TEXT_
+
+- **GrandPrixID**: Foreign key to GrandsPrix
+- **SessionID**: Foreign key to Sessions
+
+Other possible attributes are:
+
+- **Status** : Status of context, e.g. “DISABLED” for disabling DRS _TEXT_
+
+- **Flag** : Type of flag being waved “GREEN”, “RED”, “YELLOW”, “CLEAR”, “CHEQUERED” _TEXT_
+
+- **Scope** : Scope of message “Track”, “Sector”, “Driver” _TEXT_
+
+- **MarshallingSector** : Affected marshalling sector (or mini-sector) for sector-scoped messages  _INTEGER_
+
+- **AffectedDriverNumber**: Affected driver for CarEvent messages _INTEGER_
+
+- **Lap** : Number of the lap in which the message was displayed _INTEGER_
+
+24. ### WeatherData:
+This table contains the weather data for each race. Data is available from 2018 onwards.
+
+**Columns:**
+
+- **GrandPrixName**: Name of the Grand Prix. _TEXT_
+- **SessionName**: Name of the session. _TEXT_
+- **SessionTimestamp**: The timestamp in which the data was recorded. Timestamp is represented in time elapsed since start of session. _TEXT_
+- **SessionTimestampInSeconds** Session timestamp in seconds. _REAL_
+- **AirTemperatureC**: Air temperature in degrees Celsius. _REAL_
+- **HumidityPercent**: Humidity in percentage. _REAL_
+- **AirPressureMbar**: Air pressure in millibars. _REAL_
+- **IfRainfall**: Whether it is raining. _BOOLEAN_
+- **TrackTemperatureC**: Track temperature in degrees Celsius. _REAL_
+- **WindDirectionDegrees**: Wind direction in degrees. _REAL_
+- **WindSpeedMs**: Wind speed in metres per second. _REAL_
+- **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+- **SessionID**: Foreign key to Sessions. _INTEGER_
 
 ## Roadmap:
 We are working on adding more features to the database to make it even more comprehensive. Some of the features and/or changes we want to add in the future include:
 - Add robust OCR detection for the circuit layouts. Currently, my attempt of the OCR detection is not very accurate as it includes false positives, false negatives, and incorrect detection. Once a robust OCR detection is added, we can add corner names and numbers to the circuit layout SVGs.
 - Check the viability of adding telemetry data and add if viable, including mini-sectors. Telemetry data can be added in a parquet file to reduce file size and bloating of the database.
-- In seasons where telemetry is not available, there is still data for speeds at the speed trap, Intermediate 1, Intermediate 2, and Intermediate 3. We can add that if possible.
-- Add race control messages for available races.
-- Add weather data, such as temperature, precipitation, wind speed, air pressure, and so on where available using data available from `fastf1` or a historical weather API.
-- Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1.
+- Along with telemetry, circuit information from FastF1 needs to be added otherwise the telemetry data is irrelavent.
+- Add additional weather data from a weather API or a historical weather API.
+- Add mini-sector data from the `openf1` API.
+- Implement the overtakes endpoint from openf1 or do it from FastF1 itself.
+- Add the team radio mp3 recordings from openf1 to the database.
+- Because the openf1 API has data from 2023 onwards, ingest data from 2018 onwards and use that data to update the database.
+- If possible, scrape FIA's decision documents to get information
+- Add sporting and technical regulation PDFs for as many seasons as possible.
+- Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py.
+- Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
 - Make `writedb.py` more efficient. Currently a lot of the code is O(n²) and can be optimised.
 - Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
 
@@ -968,5 +1084,5 @@ Contributions are welcome! If you find any data inaccuracies or want to suggest 
 
 Even if you don't have any code to contribute, you can still help by suggesting new features or contributing to the Wikipedia pages of race reports. Currently, a lot of pages of the race reports don't have enough data showing what happened. You can change that by editing and contributing to the Wikipedia pages of race reports. This helps both the F1 community as well as this database.
 
-For major changes, please open an issue first to discuss what you would like to change.
+For major changes, please open an issue first to discuss what you would like to change. Anything that can make this database more comprehensive helps!
 

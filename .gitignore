@@ -2,3 +2,4 @@ sessionresults.db
 .venv
 compress_db.py
 /__pycache__/
+.vscode

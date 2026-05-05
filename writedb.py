@@ -12,7 +12,10 @@ from decimal import Decimal
 from collections import defaultdict, Counter
 import cv2
 import numpy as np
+import pandas as pd
 import warnings
+import fastf1
+
 
 # Suppress technical warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -34,6 +37,37 @@ def normalize_name(name):
     return "guanyu zhou"
   # Normalizes to decomposed form, converts to lowercase, and removes accents
   return unicodedata.normalize('NFKD', name.lower()).encode('ascii', 'ignore').decode('ascii').replace('-', ' ')
+
+
+def canonicalize_session_name(session_name, year=None):
+    if not session_name:
+        return session_name
+
+    cancelled_suffix = ""
+    if session_name.endswith(" - Cancelled"):
+        cancelled_suffix = " - Cancelled"
+        session_name = session_name[:-12]
+
+    replacements = {
+        "1st Free Practice": "Practice 1",
+        "2nd Free Practice": "Practice 2",
+        "3rd Free Practice": "Practice 3",
+        "4th Free Practice": "Practice 4",
+        "1st Qualifying": "Qualifying 1",
+        "2nd Qualifying": "Qualifying 2",
+        "3rd Qualifying": "Qualifying 3",
+        "Combined Qualifying": "Qualifying",
+        "Sprint Combined Qualifying": "Sprint Qualifying",
+        "Combined Sprint Qualifying": "Sprint Qualifying",
+        "1st Sprint Qualifying": "Sprint Qualifying 1",
+        "2nd Sprint Qualifying": "Sprint Qualifying 2",
+        "3rd Sprint Qualifying": "Sprint Qualifying 3",
+        "Sprint Race": "Sprint",
+    }
+
+    canonical = replacements.get(session_name, session_name)
+    return canonical + cancelled_suffix
+
 
 #Functions:
 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'} #Mimics the browser user agent to avoid being blocked by the website
@@ -68,6 +102,384 @@ def open_json(url):
             if retries == 3:
                 raise RuntimeError (f"Failed to open URL {url} due to error {e} after 3 retries.")
             time.sleep(1)
+
+
+def safe_int(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value:
+            return None
+        return int(value)
+
+    value_str = str(value).strip()
+    if not value_str or value_str.lower() == "nan":
+        return None
+
+    try:
+        return int(float(value_str))
+    except ValueError:
+        return None
+
+
+def format_timestamp_utc(value):
+    if value is None:
+        return None
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def format_session_timestamp(value):
+    if value is None:
+        return None
+    if hasattr(value, "to_pytimedelta"):
+        value = value.to_pytimedelta()
+    return str(value)
+
+
+def session_timestamp_to_seconds(value):
+    if value is None:
+        return None
+    if hasattr(value, "to_pytimedelta"):
+        value = value.to_pytimedelta()
+    if hasattr(value, "total_seconds"):
+        return value.total_seconds()
+    return None
+
+
+def normalize_session_name_for_race_control(session_name, year):
+    if not session_name:
+        return None
+
+    normalized = re.sub(r'[^a-z0-9]+', ' ', session_name.casefold()).strip()
+    normalized = normalized.replace(' cancelled', '').strip()
+
+    if not normalized or 'grid' in normalized:
+        return None
+
+    if normalized in ('race', 'grand prix', 'grand prix race'):
+        return 'grandprix'
+
+    if 'free practice' in normalized or normalized.startswith('practice '):
+        if '1st' in normalized or normalized.endswith(' 1') or 'practice 1' in normalized:
+            return 'practice1'
+        if '2nd' in normalized or normalized.endswith(' 2') or 'practice 2' in normalized:
+            return 'practice2'
+        if '3rd' in normalized or normalized.endswith(' 3') or 'practice 3' in normalized:
+            return 'practice3'
+
+    if normalized in ('sprint', 'sprint race'):
+        return 'sprint'
+
+    if 'sprint shootout' in normalized:
+        return 'sprintshootout'
+
+    if 'sprint qualifying' in normalized:
+        if any(token in normalized for token in ('1st', '2nd', '3rd', 'qualifying 1', 'qualifying 2', 'qualifying 3')):
+            return None
+        if year in (2021, 2022) and normalized == 'sprint qualifying':
+            return 'sprint'
+        if year == 2023:
+            return 'sprintshootout'
+        return 'sprintqualifying'
+
+    if 'qualifying' in normalized:
+        if any(token in normalized for token in ('1st', '2nd', '3rd', 'qualifying 1', 'qualifying 2', 'qualifying 3')):
+            return None
+        return 'qualifying'
+
+    return None
+
+
+def get_race_control_session_lookup(cursor, grandprix_id, year):
+    cursor.execute("SELECT ID, SessionName FROM Sessions WHERE GrandPrixID = ?", (grandprix_id,))
+    lookup = {}
+
+    for session_id, session_name in cursor.fetchall():
+        session_key = normalize_session_name_for_race_control(session_name, year)
+        if session_key and session_key not in lookup:
+            lookup[session_key] = {'id': session_id, 'name': session_name}
+
+    return lookup
+
+
+def require_session_record(session_lookup, session_key, grand_prix_name):
+    session_record = session_lookup.get(session_key)
+    if session_record is None:
+        raise ValueError(f"Missing session mapping for '{session_key}' in {grand_prix_name}")
+    return session_record
+
+
+def upsert_session_record(cursor, grandprix_name, session_data, grandprix_id):
+    canonical_session_name = canonicalize_session_name(session_data['name'])
+    values = (
+        grandprix_name,
+        canonical_session_name,
+        session_data['sessionnumber'],
+        session_data['wassessioncancelled'],
+        session_data['starttimetimestamputc'],
+        session_data['endtimetimestamputc'],
+        session_data['starttimetimestamp'],
+        session_data['endtimetimestamp'],
+        session_data['precisestarttime'],
+        session_data['startdtutc'],
+        session_data['enddtutc'],
+        session_data['startdt'],
+        session_data['enddt'],
+        grandprix_id,
+    )
+
+    # Re-running the importer for the same GP should refresh the same session row,
+    # not create a second copy with a new autoincremented ID.
+    cursor.execute(
+        "SELECT ID FROM Sessions WHERE GrandPrixID = ? AND SessionNumber = ? ORDER BY ID LIMIT 1",
+        (grandprix_id, session_data['sessionnumber'])
+    )
+    existing_row = cursor.fetchone()
+    if existing_row:
+        session_id = existing_row[0]
+        cursor.execute(
+            """UPDATE Sessions
+               SET GrandPrix = ?, SessionName = ?, SessionNumber = ?, WasSessionCancelled = ?,
+                   StartTimeTimestampUTC = ?, EndTimeTimestampUTC = ?, StartTimeTimestamp = ?,
+                   EndTimeTimestamp = ?, IfPreciseStartTime = ?, StartTimeinDatetimeUTC = ?,
+                   EndTimeinDatetimeUTC = ?, StartTimeinDatetime = ?, EndTimeinDatetime = ?,
+                   GrandPrixID = ?
+               WHERE ID = ?""",
+            values + (session_id,)
+        )
+        return session_id
+
+    cursor.execute(
+        """INSERT INTO Sessions (GrandPrix, SessionName, SessionNumber, WasSessionCancelled, StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp,
+                    EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC, EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime, GrandPrixID)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        values
+    )
+    return cursor.lastrowid
+
+
+def ensure_combined_qualifying_session(cursor, grandprix_name, grandprix_id, year):
+    cursor.execute(
+        """
+        SELECT ID, SessionName, SessionNumber, WasSessionCancelled,
+               StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp,
+               EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC,
+               EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime
+        FROM Sessions
+        WHERE GrandPrixID = ?
+        ORDER BY SessionNumber, ID
+        """,
+        (grandprix_id,)
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return
+
+    if any(normalize_session_name_for_race_control(session_name, year) == 'qualifying' for _, session_name, *_ in rows):
+        return
+
+    qualifying_segments = []
+    for row in rows:
+        session_name = row[1]
+        normalized = re.sub(r'[^a-z0-9]+', ' ', session_name.casefold()).strip()
+        if 'qualifying' not in normalized:
+            continue
+        if any(token in normalized for token in ('1st', '2nd', '3rd', 'qualifying 1', 'qualifying 2', 'qualifying 3')):
+            qualifying_segments.append(row)
+
+    if not qualifying_segments:
+        return
+
+    def first_non_null(index):
+        for segment in qualifying_segments:
+            value = segment[index]
+            if value is not None:
+                return value
+        return None
+
+    def last_non_null(index):
+        for segment in reversed(qualifying_segments):
+            value = segment[index]
+            if value is not None:
+                return value
+        return None
+
+    combined_name = 'Qualifying'
+    next_session_number = max(row[2] for row in rows if row[2] is not None) + 1
+    synthetic_session = {
+        'name': combined_name,
+        'sessionnumber': next_session_number,
+        'wassessioncancelled': 1 if all(row[3] for row in qualifying_segments) else 0,
+        'starttimetimestamputc': first_non_null(4),
+        'endtimetimestamputc': last_non_null(5),
+        'starttimetimestamp': first_non_null(6),
+        'endtimetimestamp': last_non_null(7),
+        'precisestarttime': first_non_null(8),
+        'startdtutc': first_non_null(9),
+        'enddtutc': last_non_null(10),
+        'startdt': first_non_null(11),
+        'enddt': last_non_null(12),
+    }
+    upsert_session_record(cursor, grandprix_name, synthetic_session, grandprix_id)
+
+
+def save_race_control_messages(cursor, year, round_number, grandprix_name, grandprix_id):
+    if year < 2018:
+        return
+
+    session_lookup = get_race_control_session_lookup(cursor, grandprix_id, year)
+    if not session_lookup:
+        return
+
+    fastf1_codes = ['FP1', 'FP2', 'FP3', 'Q']
+    if year == 2023:
+        fastf1_codes.append('SS')
+    elif year >= 2024:
+        fastf1_codes.append('SQ')
+    fastf1_codes.extend(['S', 'R'])
+
+    code_to_key = {
+        'FP1': 'practice1',
+        'FP2': 'practice2',
+        'FP3': 'practice3',
+        'Q': 'qualifying',
+        'SS': 'sprintshootout',
+        'SQ': 'sprintqualifying',
+        'S': 'sprint',
+        'R': 'grandprix'
+    }
+
+    try:
+        event = fastf1.get_event(year, round_number)
+    except Exception as exc:
+        print(f"FastF1 event lookup failed for {grandprix_name}: {exc}")
+        return
+
+    for session_code in fastf1_codes:
+        matched_session = session_lookup.get(code_to_key[session_code])
+        if not matched_session:
+            continue
+        try:
+            event.get_session_name(session_code)
+            session = event.get_session(session_code)
+            session.load(laps=False, telemetry=False, weather=False, messages=True)
+            race_control_messages = session.race_control_messages
+        except ValueError:
+            continue
+
+        if race_control_messages is None or race_control_messages.empty:
+            continue
+
+        for _, message in race_control_messages.iterrows():
+            cursor.execute("""
+                INSERT INTO RaceControlMessages (
+                    GrandPrixName, SessionName, TimestampUTC, Category, Message,
+                    Status, Flag, Scope, MarshallingSector, AffectedDriverNumber,
+                    Lap, GrandPrixID, SessionID
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                grandprix_name,
+                matched_session['name'],
+                format_timestamp_utc(message.get('Time')),
+                message.get('Category'),
+                message.get('Message'),
+                message.get('Status'),
+                message.get('Flag'),
+                message.get('Scope'),
+                safe_int(message.get('Sector')),
+                safe_int(message.get('RacingNumber')),
+                safe_int(message.get('Lap')),
+                grandprix_id,
+                matched_session['id']
+            ))
+
+        print(f"Race control messages saved for {grandprix_name} {matched_session['name']}")
+
+
+def save_weather_data(cursor, year, round_number, grandprix_name, grandprix_id):
+    if year < 2018:
+        return
+
+    session_lookup = get_race_control_session_lookup(cursor, grandprix_id, year)
+    if not session_lookup:
+        return
+
+    fastf1_codes = ['FP1', 'FP2', 'FP3', 'Q']
+    if year == 2023:
+        fastf1_codes.append('SS')
+    elif year >= 2024:
+        fastf1_codes.append('SQ')
+    fastf1_codes.extend(['S', 'R'])
+
+    code_to_key = {
+        'FP1': 'practice1',
+        'FP2': 'practice2',
+        'FP3': 'practice3',
+        'Q': 'qualifying',
+        'SS': 'sprintshootout',
+        'SQ': 'sprintqualifying',
+        'S': 'sprint',
+        'R': 'grandprix'
+    }
+
+    try:
+        event = fastf1.get_event(year, round_number)
+    except Exception as exc:
+        print(f"FastF1 event lookup failed for {grandprix_name}: {exc}")
+        return
+
+    for session_code in fastf1_codes:
+        matched_session = session_lookup.get(code_to_key[session_code])
+        if not matched_session:
+            continue
+
+        try:
+            event.get_session_name(session_code)
+            session = event.get_session(session_code)
+            session.load(laps=False, telemetry=False, weather=True, messages=False)
+            weather_data = session.weather_data
+        except ValueError:
+            continue
+
+        if weather_data is None or weather_data.empty:
+            continue
+
+        for _, weather_row in weather_data.iterrows():
+            session_time = weather_row.get('Time')
+            cursor.execute("""
+                INSERT INTO WeatherData (
+                    GrandPrixName, SessionName, SessionTimestamp,
+                    SessionTimestampInSeconds, AirTemperatureC, HumidityPercent,
+                    AirPressureMbar, IfRainfall, TrackTemperatureC,
+                    WindDirectionDegrees, WindSpeedMs, GrandPrixID, SessionID
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                grandprix_name,
+                matched_session['name'],
+                format_session_timestamp(session_time),
+                session_timestamp_to_seconds(session_time),
+                weather_row.get('AirTemp'),
+                weather_row.get('Humidity'),
+                weather_row.get('Pressure'),
+                weather_row.get('Rainfall'),
+                weather_row.get('TrackTemp'),
+                weather_row.get('WindDirection'),
+                weather_row.get('WindSpeed'),
+                grandprix_id,
+                matched_session['id']
+            ))
+
+        print(f"Weather data saved for {grandprix_name} {matched_session['name']}")
 
 #This is the function to download an image from a url and read it into a cv2 image. We use this to read the track maps when we generate the svg files for the track maps.
 def imread_from_url(url):
@@ -811,7 +1223,6 @@ def match_tracing_abbr_to_entrant(
                 f"(team={tracing_team}): {[c.get('driver') for c in candidates]}"
             )
 
-    #TracingInsights, how do I contact you about how badly you have done the 2023 Hungarian Grand Prix? 😭
     '''
     {"drivers": [{"driver": "ARO", "team": "Red Bull Racing"}, {"driver": "BEG", "team": "Williams"}, {"driver": "OSU", "team": "AlphaTauri"}, 
     {"driver": "FOR", "team": "McLaren"}, {"driver": "FCO", "team": "Alpine"}, {"driver": "BOY", "team": "Red Bull Racing"}, 
@@ -867,8 +1278,7 @@ def match_tracing_abbr_to_entrant(
                     return ent  
             elif abbr == "VIL":
                 if ent['driver'] == "Lance Stroll":
-                    return ent   
-        #one very easy practice session to analyse if you visit the tracinginsights site if you ask me!  
+                    return ent     
     '''
     {"drivers": [{"driver": "BAD", "team": "Red Bull Racing"}, {"driver": "GAS", "team": "Alpine"}, {"driver": "ANT", "team": "Mercedes"}, 
     {"driver": "ALO", "team": "Aston Martin"}, {"driver": "LEC", "team": "Ferrari"}, {"driver": "STR", "team": "Aston Martin"}, {"driver": "TSU", "team": "Red Bull Racing"}, 
@@ -881,7 +1291,7 @@ def match_tracing_abbr_to_entrant(
         for en in entrants:
             if abbr == "BAD":
                 if en['driver'] == "Max Verstappen":
-                    return en #how do you even get your abbreviations? pain.      
+                    return en       
             elif abbr == "VOI":
                 if en['driver'] == "Alexander Albon":
                     return en
@@ -2946,13 +3356,13 @@ def readlapcharts(url):
     return entrant_map
             
 
-def scrape_tracinginsights (url, type=None):
+def scrape_tracinginsights (url, type=None, driver_abbr=None, fastf1_session=None):
     #find the session we are in from the url, example sprint qualifying, etc. 
     
-    session = re.search(r'/([^/]+)/[^/]+/laptimes\.json$', url).group(1)
-    session = urllib.parse.unquote(session).lower().replace(" ","")
-    if session == "race":
-        session = "grandprix"
+    session_name = re.search(r'/([^/]+)/[^/]+/laptimes\.json$', url).group(1)
+    session_name = urllib.parse.unquote(session_name).lower().replace(" ","")
+    if session_name == "race":
+        session_name = "grandprix"
     retries = 0
     while retries < 3:
         try:
@@ -2962,23 +3372,135 @@ def scrape_tracinginsights (url, type=None):
             retries += 1
             time.sleep(1)
             if retries == 3:
-                raise RuntimeError ("Failed to open TracingInsights data")
+                numberoflaps = list(fastf1_session.laps.pick_drivers(driver_abbr)['LapNumber'])
+                data = json.dumps({"lap": numberoflaps})
     data = json.loads(data)
+
+    # Mapping from TracingInsights keys to fastf1 field names with conversion logic
+    tracinginsightskeysmappedtofastf1 = {
+        'time': ('Time', lambda x: x),  # Return as-is for now, handled by get_float_value
+        'compound': ('Compound', lambda x: x),
+        'stint': ('Stint', lambda x: x),
+        's1': ('Sector1Time', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        's2': ('Sector2Time', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        's3': ('Sector3Time', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        'life': ('TyreLife', lambda x: x),
+        'pos': ('Position', lambda x: x),
+        'status': ('TrackStatus', lambda x: x),
+        'lST': ('LapStartDate', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        'lSD': ('LapStartDate', lambda x: str(x) if not pd.isna(x) else None),
+        'sesT': ('Time', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        's1T': ('Sector1SessionTime', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        's2T': ('Sector2SessionTime', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        's3T': ('Sector3SessionTime', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        'vi1': ('SpeedI1', lambda x: x),
+        'vi2': ('SpeedI2', lambda x: x),
+        'vfl': ('SpeedFL', lambda x: x),
+        'vst': ('SpeedST', lambda x: x),
+        'pin': ('PitInTime', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        'pout': ('PitOutTime', lambda x: x.total_seconds() if hasattr(x, 'total_seconds') and not pd.isna(x) else None),
+        'del': ("Deleted", lambda x: x),
+        "delR": ("DeletedReason", lambda x: x),
+        "iacc": ("IsAccurate", lambda x: x),
+        "ff1G": ("FastF1Generated", lambda x: x)
+    }
+
+    def get_fastf1_fallback(ti_key, lap_number):
+        """Fetch value from fastf1 session if tracinginsights data is missing"""
+        if not fastf1_session or not driver_abbr:
+            return None
+        try:
+            # Get the driver's laps from fastf1 session
+            driver_laps = fastf1_session.laps.pick_drivers(driver_abbr)
+            if driver_laps.empty:
+                return None
+            
+            # Find the lap with matching lap number
+            lap_row = driver_laps[driver_laps['LapNumber'] == lap_number]
+            if lap_row.empty:
+                return None
+            
+            # Get the fastf1 field name and conversion function
+            if ti_key not in tracinginsightskeysmappedtofastf1:
+                return None
+            
+            ff1_field, converter = tracinginsightskeysmappedtofastf1[ti_key]
+            value = lap_row[ff1_field].iloc[0]
+            
+            # Check for NaN/NaT values
+            if pd.isna(value):
+                return None
+            
+            # Apply conversion function (timedelta to seconds, etc.)
+            converted = converter(value)
+            return converted
+        except Exception:
+            return None
+
+    def get_value(key, index):
+        values = data.get(key)
+        if not values:
+            # Try fallback to fastf1 if available
+            if fastf1_session and driver_abbr and key in tracinginsightskeysmappedtofastf1:
+                try:
+                    lap_num = int(data['lap'][index]) 
+                    if lap_num:
+                        fallback_value = get_fastf1_fallback(key, lap_num)
+                        if fallback_value is not None:
+                            return fallback_value
+                except KeyError:
+                    fastf1_lap = fastf1_session.laps.pick_drivers(driver_abbr).pick_laps(lap_num)
+                    if not fastf1_lap.empty:
+                        ff1_field, converter = tracinginsightskeysmappedtofastf1[key]
+                        value = fastf1_lap[ff1_field].iloc[0]
+                        if pd.isna(value):
+                            return None
+                        return converter(value)
+            return None
+        value = values[index]
+        if value in ('None', 'nan', 'NaN', 'UNKNOWN', 'TEST_UNKNOWN'):
+            return None
+        return value
+
+    def get_float_value(key, index):
+        value = get_value(key, index)
+        if value is None:
+            return None
+        return float(Decimal(str(value)).quantize(Decimal('0.001')))
+
+    def get_int_value(key, index):
+        value = get_value(key, index)
+        if value is None:
+            return None
+        return int(value)
+
+    def get_session_time_text(key, index):
+        value = get_float_value(key, index)
+        return tts_to_normal(value) if value is not None else None
+    
+    def get_status(index):
+        value = get_value('status', index)
+        if not value:
+            return None
+        return value
+
+
     laps = []
     for index in range(len(data['lap'])):
         lap = {}
-        lap['timeinseconds'] = float(Decimal(str(data['time'][index])).quantize(Decimal('0.001'))) if data['time'][index] != 'None' else None
+        lap['timeinseconds'] = get_float_value('time', index)
+        lap['time_in_seconds'] = lap['timeinseconds']
         lap['time'] = tts_to_normal(lap['timeinseconds']) if lap['timeinseconds'] is not None else None
-        lap['compound'] = data['compound'][index] if data['compound'][index] not in ('nan', "TEST_UNKNOWN", "UNKNOWN", "None") else None
+        lap['compound'] = get_value('compound', index)
         lap['lap'] = int(data['lap'][index]) 
-        lap['stint'] = data['stint'][index] if data['stint'][index] != 'None' else None
-        lap['s1'] = float(Decimal(str(data['s1'][index])).quantize(Decimal('0.001'))) if data['s1'][index] != 'None' else None
-        lap['s2'] = float(Decimal(str(data['s2'][index])).quantize(Decimal('0.001'))) if data['s2'][index] != 'None' else None
-        lap['s3'] = float(Decimal(str(data['s3'][index])).quantize(Decimal('0.001'))) if data['s3'][index] != 'None' else None
-        lap['life'] = data['life'][index] if data['life'][index] != 'None' else None
-        lap['position'] = data['pos'][index] if data['pos'][index] != 'None' else None
+        lap['stint'] = get_int_value('stint', index)
+        lap['s1'] = get_float_value('s1', index)
+        lap['s2'] = get_float_value('s2', index)
+        lap['s3'] = get_float_value('s3', index)
+        lap['life'] = get_int_value('life', index)
+        lap['position'] = get_int_value('pos', index)
         lap['status'] = []
-        for statuschar in data['status'][index]:
+        for statuschar in get_status(index) or []:
             if statuschar == '1':
                 lap['status'].append('Green Flag')
             elif statuschar == '2':
@@ -2993,10 +3515,100 @@ def scrape_tracinginsights (url, type=None):
                 lap['status'].append('Virtual Safety Car Ending')
         lap['status'] = json.dumps(lap['status'])
         lap['qs'] = data.get('qs')[index] if data.get('qs') else None
+        lap['sessionlapstarttime'] = get_session_time_text('lST', index)
+        lap['sessionlapstarttimeinseconds'] = get_float_value('lST', index)
+        lap['sessionlapstarttimeindatetimeutc'] = get_value('lSD', index)
+        lap['sessionlapendtime'] = get_session_time_text('sesT', index)
+        lap['sessionlapendtimeinseconds'] = get_float_value('sesT', index)
+        lap['sector1endtime'] = get_session_time_text('s1T', index)
+        lap['sector1endtimeinseconds'] = get_float_value('s1T', index)
+        lap['sector2endtime'] = get_session_time_text('s2T', index)
+        lap['sector2endtimeinseconds'] = get_float_value('s2T', index)
+        lap['sector3endtime'] = get_session_time_text('s3T', index)
+        lap['sector3endtimeinseconds'] = get_float_value('s3T', index)
+        lap['speedintermediate1'] = get_int_value('vi1', index)
+        lap['speedintermediate2'] = get_int_value('vi2', index)
+        lap['speedfinishline'] = get_int_value('vfl', index)
+        lap['speedspeedtrap'] = get_int_value('vst', index)
+        lap['pitinsessiontime'] = get_session_time_text('pin', index)
+        lap['pitinsessiontimeinseconds'] = get_float_value('pin', index)
+        lap['pitoutsessiontime'] = get_session_time_text('pout', index)
+        lap['pitoutsessiontimeinseconds'] = get_float_value('pout', index)
+        lap['ifdeletedlap'] = get_value('del', index)
+        lap['deletereason'] = get_value('delR', index)
+        lap['ifaccurate'] = get_value('iacc', index)
+        lap['fastf1generated'] = get_value('ff1G', index)
         laps.append(lap)
     return laps
 
-def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None, grandprix_name=None):
+
+def insert_lap_by_lap_row(cur, gp, driver_name, session_name, session_id, lap_data, grandprix_id, driver_id, qualifying_segment=None):
+    def pick(*keys):
+        for key in keys:
+            if key in lap_data:
+                return lap_data.get(key)
+        return None
+
+    cur.execute("""
+    INSERT INTO LapByLap (
+        GrandPrix, Driver, Position, Lap, Session, Time, TimeInSeconds, TyreCompound, StintNumber,
+        Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, QualifyingSegment,
+        SessionLapStartTime, SessionLapStartTimeInSeconds, SessionLapStartTimeDateTimeUTC,
+        SessionLapEndTime, SessionLapEndTimeInSeconds,
+        Sector1EndSessionTime, Sector1EndSessionTimeInSeconds,
+        Sector2EndSessionTime, Sector2EndSessionTimeInSeconds,
+        Sector3EndSessionTime, Sector3EndSessionTimeInSeconds,
+        SpeedIntermediate1, SpeedIntermediate2, SpeedFinishLine, SpeedSpeedTrap,
+        PitInSessionTime, PitInSessionTimeInSeconds, PitOutSessionTime, PitOutSessionTimeInSeconds,
+        IfDeletedLap, DeleteReason, IfAccurate, FastF1Generated,
+        SessionID, GrandPrixID, DriverID
+    )
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        gp,
+        driver_name,
+        pick('position'),
+        pick('lap'),
+        session_name,
+        pick('time'),
+        pick('time_in_seconds', 'timeinseconds'),
+        pick('compound'),
+        pick('stint'),
+        pick('s1'),
+        pick('s2'),
+        pick('s3'),
+        pick('life'),
+        pick('status'),
+        qualifying_segment if qualifying_segment is not None else pick('qs'),
+        pick('sessionlapstarttime', 'sessionlapstartttime'),
+        pick('sessionlapstarttimeinseconds', 'sessionlapstartttimeinseconds'),
+        pick('sessionlapstarttimeindatetimeutc'),
+        pick('sessionlapendtime'),
+        pick('sessionlapendtimeinseconds'),
+        pick('sector1endtime'),
+        pick('sector1endtimeinseconds'),
+        pick('sector2endtime'),
+        pick('sector2endtimeinseconds'),
+        pick('sector3endtime'),
+        pick('sector3endtimeinseconds'),
+        pick('speedintermediate1'),
+        pick('speedintermediate2'),
+        pick('speedfinishline'),
+        pick('speedspeedtrap'),
+        pick('pitinsessiontime'),
+        pick('pitinsessiontimeinseconds'),
+        pick('pitoutsessiontime'),
+        pick('pitoutsessiontimeinseconds'),
+        pick('ifdeletedlap'),
+        pick('deletereason'),
+        pick('ifaccurate'),
+        pick('fastf1generated'),
+        session_id,
+        grandprix_id,
+        driver_id
+    ))
+
+def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None, grandprix_name=None, fastf1_session=None):
     open_url(linkhref)
     output = []
     global name_map
@@ -3050,6 +3662,10 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
             lap_number = int(lap_td.text.strip())
             # Check for safety car
             safetycar = "sc" in lap_td.get("class", [])
+            if year > 2015 and safetycar:
+                track_status = ["Safety Car"]
+            elif 2015 <= year <= 2017 and safetycar:
+                track_status = ["Safety Car", "Virtual Safety Car"]  # no differentiaton in this period
             position_cells = row.find_all("td")[1:]  # Skip lap number
             for position, cell in enumerate(position_cells, start=1):
                 code = cell.text.strip()
@@ -3060,7 +3676,6 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                         "number": resolved_driver_map[code]["number"],
                         "lap": lap_number,
                         "type": "grandprix" if linkhref.endswith('/tour-par-tour.aspx') else "sprint",
-                        "safetycar": safetycar
                     })
     else:
         if gp.endswith('Indianapolis 500'):
@@ -3089,6 +3704,7 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                 cacheddrivers = []
                 for lap in laps:
                     findlapnumber = int(lap.find('div', class_='lap-number').text.strip().replace('Lap ', ''))
+
                     maindriver = lap.find('div', class_='main-driver')
                     if maindriver.find('div', class_ = 'time').text.strip() != '':
                         driverposition = int(re.sub(r'\D', '', maindriver.find('span', class_='label').text.strip()))
@@ -3116,6 +3732,27 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                 try:
                     year_int = int(year)
                     if year_int >= 2018:
+                        # Load fastf1 session for fallback data if not provided
+                        ff1_session = fastf1_session
+                        if not ff1_session:
+                            try:
+                                session_type = "Race" if linkhref.endswith('/tour-par-tour.aspx') else "Sprint"
+                                # Extract circuit name from grandprix_name
+                                gp_name = grandprix_name
+                                if gp_name == "Mexican Grand Prix":
+                                    gp_name = "Mexico City Grand Prix" if year_int >= 2021 else "Mexico"
+                                circuit_name = gp_name.replace(" Grand Prix", "").strip()
+                                
+                                # Map session type to fastf1 session name
+                                if session_type == "Race":
+                                    ff1_session = fastf1.get_session(year_int, circuit_name, 'R')
+                                else:
+                                    ff1_session = fastf1.get_session(year_int, circuit_name, 'S')
+                                ff1_session.load()
+                            except Exception as e:
+                                print(f"Warning: Could not load fastf1 session for fallback: {e}")
+                                ff1_session = None
+                        
                         # Try to get data from TracingInsights
                         #https://cdn.jsdelivr.net/gh/TracingInsights/2020/Sakhir%20Grand%20Prix/Qualifying/VER/laptimes.json"
                         session = "Race" if linkhref.endswith('/tour-par-tour.aspx') else "Sprint"
@@ -3143,7 +3780,7 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                 print(f"{driver_abbr} not in session {session_}")
                                 continue                            
                             ti_url = f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}/{urllib.parse.quote(grandprix_name)}/{session_}/{driver_abbr}/laptimes.json"
-                            ti_laps = scrape_tracinginsights(ti_url)
+                            ti_laps = scrape_tracinginsights(ti_url, driver_abbr=driver_abbr, fastf1_session=ff1_session)
                             if session == "Race":
                                 driver_name = resolved_driver_map[driver_abbr]['driver']
 
@@ -3159,7 +3796,31 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                     entrant_entry["s2"] = ti_lap["s2"]
                                     entrant_entry["s3"] = ti_lap["s3"]
                                     entrant_entry["life"] = ti_lap["life"]
-                                    entrant_entry["status"] = json.dumps(ti_lap["status"])
+                                    entrant_entry["status"] = ti_lap["status"]
+                                    entrant_entry["sessionlapstarttime"] = ti_lap["sessionlapstarttime"]
+                                    entrant_entry["sessionlapstarttimeinseconds"] = ti_lap["sessionlapstarttimeinseconds"]
+                                    entrant_entry["sessionlapstarttimeindatetimeutc"] = ti_lap["sessionlapstarttimeindatetimeutc"]
+                                    entrant_entry["sessionlapendtime"] = ti_lap["sessionlapendtime"]
+                                    entrant_entry["sessionlapendtimeinseconds"] = ti_lap["sessionlapendtimeinseconds"]
+                                    entrant_entry["sector1endtime"] = ti_lap["sector1endtime"]
+                                    entrant_entry["sector1endtimeinseconds"] = ti_lap["sector1endtimeinseconds"]
+                                    entrant_entry["sector2endtime"] = ti_lap["sector2endtime"]
+                                    entrant_entry["sector2endtimeinseconds"] = ti_lap["sector2endtimeinseconds"]
+                                    entrant_entry["sector3endtime"] = ti_lap["sector3endtime"]
+                                    entrant_entry["sector3endtimeinseconds"] = ti_lap["sector3endtimeinseconds"]
+                                    entrant_entry["speedintermediate1"] = ti_lap["speedintermediate1"]
+                                    entrant_entry["speedintermediate2"] = ti_lap["speedintermediate2"]
+                                    entrant_entry["speedfinishline"] = ti_lap["speedfinishline"]
+                                    entrant_entry["speedspeedtrap"] = ti_lap["speedspeedtrap"]
+                                    entrant_entry["pitinsessiontime"] = ti_lap["pitinsessiontime"]
+                                    entrant_entry["pitinsessiontimeinseconds"] = ti_lap["pitinsessiontimeinseconds"]
+                                    entrant_entry["pitoutsessiontime"] = ti_lap["pitoutsessiontime"]
+                                    entrant_entry["pitoutsessiontimeinseconds"] = ti_lap["pitoutsessiontimeinseconds"]
+                                    entrant_entry["ifdeletedlap"] = ti_lap["ifdeletedlap"]
+                                    entrant_entry["deletereason"] = ti_lap["deletereason"]
+                                    entrant_entry["ifaccurate"] = ti_lap["ifaccurate"]
+                                    entrant_entry["fastf1generated"] = ti_lap["fastf1generated"]
+
 
                                     if entrant_entry.get("time") is None:
                                         entrant_entry["time"] = ti_lap["time"]
@@ -3185,6 +3846,31 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                     entrant_entry["status"] = json.dumps(ti_lap.get("status"))
                                     entrant_entry["time"] = ti_lap["time"]
                                     entrant_entry["time_in_seconds"] = ti_lap.get("timeinseconds")
+                                    entrant_entry["sessionlapstartttime"] =  ti_lap["sessionlapstarttime"]
+                                    entrant_entry["sessionlapstartttimeinseconds"] = ti_lap["sessionlapstarttimeinseconds"]
+                                    entrant_entry["sessionlapstarttime"] =  ti_lap["sessionlapstarttime"]
+                                    entrant_entry["sessionlapstarttimeinseconds"] = ti_lap["sessionlapstarttimeinseconds"]
+                                    entrant_entry["sessionlapstarttimeindatetimeutc"] = ti_lap["sessionlapstarttimeindatetimeutc"]
+                                    entrant_entry["sessionlapendtime"] = ti_lap["sessionlapendtime"]
+                                    entrant_entry["sessionlapendtimeinseconds"] = ti_lap["sessionlapendtimeinseconds"]
+                                    entrant_entry["sector1endtime"] = ti_lap["sector1endtime"]
+                                    entrant_entry["sector1endtimeinseconds"] = ti_lap["sector1endtimeinseconds"]
+                                    entrant_entry["sector2endtime"] = ti_lap["sector2endtime"]
+                                    entrant_entry["sector2endtimeinseconds"] = ti_lap["sector2endtimeinseconds"]
+                                    entrant_entry["sector3endtime"] = ti_lap["sector3endtime"]
+                                    entrant_entry["sector3endtimeinseconds"] = ti_lap["sector3endtimeinseconds"]
+                                    entrant_entry["speedintermediate1"] = ti_lap["speedintermediate1"]
+                                    entrant_entry["speedintermediate2"] = ti_lap["speedintermediate2"]
+                                    entrant_entry["speedfinishline"] = ti_lap["speedfinishline"]
+                                    entrant_entry["speedspeedtrap"] = ti_lap["speedspeedtrap"]
+                                    entrant_entry["pitinsessiontime"] = ti_lap["pitinsessiontime"]
+                                    entrant_entry["pitinsessiontimeinseconds"] = ti_lap["pitinsessiontimeinseconds"]
+                                    entrant_entry["pitoutsessiontime"] = ti_lap["pitoutsessiontime"]
+                                    entrant_entry["pitoutsessiontimeinseconds"] = ti_lap["pitoutsessiontimeinseconds"]
+                                    entrant_entry["ifdeletedlap"] = ti_lap["ifdeletedlap"]
+                                    entrant_entry["deletereason"] = ti_lap["deletereason"]
+                                    entrant_entry["ifaccurate"] = ti_lap["ifaccurate"]
+                                    entrant_entry["fastf1generated"] = ti_lap["fastf1generated"]                                    
                                 
                     break  # Exit retry loop on success               
                 except Exception as e:
@@ -3603,6 +4289,8 @@ for season in seasons[index:]:
            break
         else:
             currentgrandprix = cells[1].find('a').text.strip()
+            if year > 2020:
+                currentgrandprix = currentgrandprix.replace("Mexican Grand Prix", "Mexico City Grand Prix")
             gps.append(currentgrandprix)
             thedate = cells[0].text.strip()
             dateindatetime = datetime.date(year, months[cells[0].text.strip().split()[0]], int(cells[0].text.strip().split()[1]))
@@ -3804,10 +4492,11 @@ for season in seasons[index:]:
         ix = 1
         dest = []
         lapchartstoberead = []
+        flaggingmaxspeeds = []
         for s in info:
             ix += 1
             tde = {
-                'name': s['session'].get('shortname') or s['session']['name'],
+                'name': s['session'].get('shortName') or s['session']['name'],
                 'openurl': s['session']['slug'],
                 'sessionnumber': ix,
                 'wassessioncancelled': s['cancelled'],
@@ -3821,11 +4510,14 @@ for season in seasons[index:]:
                 'startdt': datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=s['startTime']) if s['startTime'] else None,
                 'enddt': datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=s['endTime']) if s['endTime'] else None,  
             }
-            cur.execute("""INSERT INTO Sessions (GrandPrix, SessionName, SessionNumber, WasSessionCancelled, StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp, 
-                        EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC, EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime, GrandPrixID)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", 
-                        (gp, tde['name'], tde['sessionnumber'], tde['wassessioncancelled'], tde['starttimetimestamputc'], tde['endtimetimestamputc'], tde['starttimetimestamp'], 
-                        tde['endtimetimestamp'], tde['precisestarttime'], tde['startdtutc'], tde['enddtutc'], tde['startdt'], tde['enddt'], race_info['race_number'])) 
+            if "Sprint Shootout" in tde['name'] and year >= 2024:
+                tde['name'] = tde['name'].replace('Sprint Shootout', 'Sprint Qualifying')
+            session_id = upsert_session_record(cur, gp, tde, race_info['race_number'])
+            if year > 2005:
+                session_facts = open_json(f"https://motorsportstats.com/api/session-facts?sessionSlug={tde['openurl']}")
+                if "MaxSpeed" in session_facts:
+                    timing_points = open_json(f"https://motorsportstats.com/api/timing-points?sessionSlug={tde['openurl']}")
+                    flaggingmaxspeeds.append({'session': tde['name'], 'sessionSlug': tde['openurl'], 'timingPoints': timing_points, 'sessionid': session_id})             
             openurl = tde['openurl']
             if 'sprint' in openurl:
                 sopenurl = openurl
@@ -3845,6 +4537,9 @@ for season in seasons[index:]:
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
                 if 'sprint-qualifying' in openurl or ('race' not in openurl and 'sprint' not in openurl):
                     lapchartstoberead.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapChart&size=100000')
+        ensure_combined_qualifying_session(cur, gp, race_info['race_number'], year)
+        save_race_control_messages(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
+        save_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         if race_info['race_number'] > 344: #only after 1981 argentine grand prix
             grandprixlinks.append({'href': f"https://motorsportstats.com/api/results-classification?sessionSlug=fia-formula-one-world-championship_{year}_{msgrandprix}_race"})
 
@@ -4026,6 +4721,7 @@ for season in seasons[index:]:
             cur.execute("UPDATE EngineModels SET needstatsupdate = 1 WHERE ID = ?", (engine_model_id,))
             cur.execute("UPDATE Tyres SET needstatsupdate = 1 WHERE ID = ?", (tyre_id,))
         print ("Results saved to database")   
+        session_lookup = get_race_control_session_lookup(cur, grandprix_id, year)
 
         for drivername in drivernames:
             fulfilled = False
@@ -4091,6 +4787,7 @@ for season in seasons[index:]:
 
                     # Practice 1
                     if any(link['href'].endswith('practice/1') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
+                        practice1_session = require_session_record(session_lookup, 'practice1', gp)
                         qwertyuiop = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/drivers.json", headers=headers)
                         driverdatafortracinginsights = json.loads(urllib.request.urlopen(qwertyuiop).read())['drivers']
                         
@@ -4127,7 +4824,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice1data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/{driver_abbr}/laptimes.json", 'practice1')
+                                practice1data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/{driver_abbr}/laptimes.json", 'practice1', driver_abbr=driver_abbr)
                                 for practice1lap in practice1data:
                                     # Use MSS data as fallback if TracingInsights time is None
                                     time_val = practice1lap.get('time')
@@ -4146,11 +4843,14 @@ for season in seasons[index:]:
                                         if mss_key in fp1_lap_chart:
                                             position_val = fp1_lap_chart[mss_key]
                                     
-                                    cur.execute("""INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, GrandPrixID, DriverID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (gp, matched_entrant['driver'], position_val, practice1lap['lap'], 'practice1', time_val, time_in_sec, practice1lap.get('compound'), practice1lap.get('stint'), practice1lap.get('s1'), practice1lap.get('s2'), practice1lap.get('s3'), practice1lap.get('life'), practice1lap.get('status'), grandprix_id, driver_id))
+                                    practice1lap['time'] = time_val
+                                    practice1lap['time_in_seconds'] = time_in_sec
+                                    practice1lap['position'] = position_val
+                                    insert_lap_by_lap_row(cur, gp, matched_entrant['driver'], practice1_session['name'], practice1_session['id'], practice1lap, grandprix_id, driver_id)
                     
                     # Practice 2
                     if any(link['href'].endswith('practice/2') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
+                        practice2_session = require_session_record(session_lookup, 'practice2', gp)
                         asdfghjkl = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/drivers.json", headers=headers)
                         driverdatafortracinginsights2 = json.loads(urllib.request.urlopen(asdfghjkl).read())['drivers']
                         
@@ -4186,7 +4886,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice2data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/{driver_abbr}/laptimes.json", 'practice2')
+                                practice2data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/{driver_abbr}/laptimes.json", 'practice2', driver_abbr=driver_abbr)
                                 for practice2lap in practice2data:
                                     # Use MSS data as fallback
                                     time_val = practice2lap.get('time')
@@ -4205,11 +4905,14 @@ for season in seasons[index:]:
                                         if mss_key in fp2_lap_chart:
                                             position_val = fp2_lap_chart[mss_key]
                                     
-                                    cur.execute("""INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, GrandPrixID, DriverID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (gp, matched_entrant['driver'], position_val, practice2lap['lap'], 'practice2', time_val, time_in_sec, practice2lap.get('compound'), practice2lap.get('stint'), practice2lap.get('s1'), practice2lap.get('s2'), practice2lap.get('s3'), practice2lap.get('life'), practice2lap.get('status'), grandprix_id, driver_id))
+                                    practice2lap['time'] = time_val
+                                    practice2lap['time_in_seconds'] = time_in_sec
+                                    practice2lap['position'] = position_val
+                                    insert_lap_by_lap_row(cur, gp, matched_entrant['driver'], practice2_session['name'], practice2_session['id'], practice2lap, grandprix_id, driver_id)
                     
                     # Practice 3
                     if any(link['href'].endswith('practice/3') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
+                        practice3_session = require_session_record(session_lookup, 'practice3', gp)
                         zxcvbnm = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/drivers.json", headers=headers)
                         driverdatafortracinginsights3 = json.loads(urllib.request.urlopen(zxcvbnm).read())['drivers']
                         
@@ -4245,7 +4948,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice3data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/{driver_abbr}/laptimes.json", 'practice3')
+                                practice3data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/{driver_abbr}/laptimes.json", 'practice3', driver_abbr=driver_abbr)
                                 for practice3lap in practice3data:
                                     # Use MSS data as fallback
                                     time_val = practice3lap.get('time')
@@ -4264,12 +4967,15 @@ for season in seasons[index:]:
                                         if mss_key in fp3_lap_chart:
                                             position_val = fp3_lap_chart[mss_key]
                                     
-                                    cur.execute("""INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, GrandPrixID, DriverID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (gp, matched_entrant['driver'], position_val, practice3lap['lap'], 'practice3', time_val, time_in_sec, practice3lap.get('compound'), practice3lap.get('stint'), practice3lap.get('s1'), practice3lap.get('s2'), practice3lap.get('s3'), practice3lap.get('life'), practice3lap.get('status'), grandprix_id, driver_id))
+                                    practice3lap['time'] = time_val
+                                    practice3lap['time_in_seconds'] = time_in_sec
+                                    practice3lap['position'] = position_val
+                                    insert_lap_by_lap_row(cur, gp, matched_entrant['driver'], practice3_session['name'], practice3_session['id'], practice3lap, grandprix_id, driver_id)
                     
                     # Sprint Qualifying
                     if any(link['href'].endswith('sprint-qualifying') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
                         sessiontype = 'sprintshootout' if year == 2023 else 'sprintqualifying'
+                        sprint_qualifying_session = require_session_record(session_lookup, sessiontype, gp)
                         urlforlink = 'Sprint%20Shootout' if year == 2023 else 'Sprint%20Qualifying'
                         
                         # Get MSS laptimes for sprint qualifying (q1, q2, q3)
@@ -4307,7 +5013,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                sprintqualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/{driver_abbr}/laptimes.json")
+                                sprintqualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
                                 
                                 # Group laps by driver to determine qs
                                 driver_laps = [lap for lap in sprintqualifyingdata if lap]
@@ -4336,11 +5042,14 @@ for season in seasons[index:]:
                                                     position_val = sq_lap_chart[mss_key]
                                                 break
                                     
-                                    cur.execute("""INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, QualifyingSegment, GrandPrixID, DriverID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (gp, matched_entrant['driver'], position_val, sprintqualifyinglap['lap'], sessiontype, time_val, time_in_sec, sprintqualifyinglap.get('compound'), sprintqualifyinglap.get('stint'), sprintqualifyinglap.get('s1'), sprintqualifyinglap.get('s2'), sprintqualifyinglap.get('s3'), sprintqualifyinglap.get('life'), sprintqualifyinglap.get('status'), qs_val, grandprix_id, driver_id))
+                                    sprintqualifyinglap['time'] = time_val
+                                    sprintqualifyinglap['time_in_seconds'] = time_in_sec
+                                    sprintqualifyinglap['position'] = position_val
+                                    insert_lap_by_lap_row(cur, gp, matched_entrant['driver'], sprint_qualifying_session['name'], sprint_qualifying_session['id'], sprintqualifyinglap, grandprix_id, driver_id, qualifying_segment=qs_val)
                     
                     # Qualifying
                     if any(link['href'].endswith('qualifying') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
+                        qualifying_session = require_session_record(session_lookup, 'qualifying', gp)
                         # Get MSS laptimes for qualifying (q1, q2, q3)
                         q_mss_laps = {}
                         q_lap_chart = {}
@@ -4376,7 +5085,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                qualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/{driver_abbr}/laptimes.json")
+                                qualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
                                 
                                 # Group laps by driver to determine qs
                                 driver_laps = [lap for lap in qualifyingdata if lap]
@@ -4405,10 +5114,13 @@ for season in seasons[index:]:
                                                     position_val = q_lap_chart[mss_key]
                                                 break
                                     
-                                    cur.execute("""INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, QualifyingSegment, GrandPrixID, DriverID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (gp, matched_entrant['driver'], position_val, qualifyinglap['lap'], "qualifying", time_val, time_in_sec, qualifyinglap.get('compound'), qualifyinglap.get('stint'), qualifyinglap.get('s1'), qualifyinglap.get('s2'), qualifyinglap.get('s3'), qualifyinglap.get('life'), qualifyinglap.get('status'), qs_val, grandprix_id, driver_id))
+                                    qualifyinglap['time'] = time_val
+                                    qualifyinglap['time_in_seconds'] = time_in_sec
+                                    qualifyinglap['position'] = position_val
+                                    insert_lap_by_lap_row(cur, gp, matched_entrant['driver'], qualifying_session['name'], qualifying_session['id'], qualifyinglap, grandprix_id, driver_id, qualifying_segment=qs_val)
                 
                 if trigger == True:
+                    sprint_session = require_session_record(session_lookup, 'sprint', gp)
                     sprintlapbylap = parse_lap_by_lap(f"https://www.statsf1.com{grandprix['href'].replace('.aspx', '')}/sprint.aspx?tpt", results, year=year, grandprix_name=gp.replace(str(year), '').strip())[0]
                     
                     # Get MSS laptimes for sprint race as fallback
@@ -4432,11 +5144,9 @@ for season in seasons[index:]:
                                 time_val = time_val or sprint_mss_laps[mss_key]['time']
                                 time_in_sec = time_in_sec or sprint_mss_laps[mss_key]['timeinseconds']
                         
-                        cur.execute("""
-                        INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, SafetyCar, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, GrandPrixID, DriverID)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (gp, instance['driver'], instance['position'], instance['lap'], instance['type'], instance['safetycar'], time_val, time_in_sec, instance.get('compound'), instance.get('stint'), instance.get('s1'), instance.get('s2'), instance.get('s3'), instance.get('life'), instance.get('status'), grandprix_id, driver_id))   
+                        instance['time'] = time_val
+                        instance['time_in_seconds'] = time_in_sec
+                        insert_lap_by_lap_row(cur, gp, instance['driver'], sprint_session['name'], sprint_session['id'], instance, grandprix_id, driver_id)
                     if "PitStop" in open_json(f"https://motorsportstats.com/api/result-statistics?{sopenurl}"):        
                         sprintpitstopsummaryjson = open_json(f"https://motorsportstats.com/api/result-statistics?sessionSlug={sopenurl}&sessionFact=PitStop&size=100000")['content'] 
                         for pitstop in sprintpitstopsummaryjson:
@@ -4452,22 +5162,19 @@ for season in seasons[index:]:
                                     duration = float(Decimal(str(pitstop['duration'] / 1000)).quantize(Decimal('0.001'))) if pitstop.get('duration') is not None else None
                                     totalduration = float(Decimal(str(pitstop['totalDuration'] / 1000)).quantize(Decimal('0.001'))) if pitstop.get('totalDuration') is not None else None
                                     cur.execute("""
-                                    INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, Type, GrandPrixID, DriverID, ConstructorID)
+                                    INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, SessionID, GrandPrixID, DriverID, ConstructorID)
                                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                                     """,
-                                    (gp, entrant['number'], driver_name, entrant['constructor'], stopnumber, lap, duration, duration, timeofday, totalduration, totalduration, 'sprint', grandprix_id, driver_id, constructor_id))
+                                    (gp, entrant['number'], driver_name, entrant['constructor'], stopnumber, lap, duration, duration, timeofday, totalduration, totalduration, sprint_session['id'], grandprix_id, driver_id, constructor_id))
                                     break
                 #print (lapbylap)  
                 #print (name_map)  
                 print ("Lap by lap Parsed")
                 
+                race_session = require_session_record(session_lookup, 'grandprix', gp)
                 for instance in lapbylap:
                     driver_id = driverids[instance['driver']]
-                    cur.execute("""
-                    INSERT INTO LapByLap (GrandPrix, Driver, Position, Lap, Type, SafetyCar, Time, TimeInSeconds, TyreCompound, StintNumber, Sector1Time, Sector2Time, Sector3Time, TyreAge, TrackStatus, GrandPrixID, DriverID)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (gp, instance['driver'], instance['position'], instance['lap'], instance['type'], instance['safetycar'], instance.get('time'), instance.get('time_in_seconds'), instance.get('compound'), instance.get('stint'), instance.get('s1'), instance.get('s2'), instance.get('s3'), instance.get('life'), instance.get('status'), grandprix_id, driver_id)) 
+                    insert_lap_by_lap_row(cur, gp, instance['driver'], race_session['name'], race_session['id'], instance, grandprix_id, driver_id)
                 print("Lap by lap data saved to database")    
             elif item['href'].endswith("/championnat.aspx"): 
                 driversprogress, construtorsprogress = parse_in_season_progress(f"https://www.statsf1.com{item['href']}")
@@ -4475,7 +5182,7 @@ for season in seasons[index:]:
                 print ("In season progress Parsed")
                 
                 for driver in driversprogress:
-                    driver_id = driverids[driver['driver']]
+                    driver_id = driverids.get(driver['driver'], cur.execute("SELECT ID FROM Drivers WHERE Name = ?", (driver['driver'],)).fetchone()[0])
                     cur.execute("""
                      INSERT INTO InSeasonProgressDrivers (GrandPrix, PositionAtThisPoint, Driver, PointsAtThisPoint, GrandPrixID, DriverID)
                      VALUES (?,?,?,?,?,?)
@@ -4491,7 +5198,75 @@ for season in seasons[index:]:
                             """, 
                             (gp, driver['positionatthispoint'], driver['constructor'], driver['engine'], driver['pointsatthispoint'], grandprix_id, constructor_id, engine_id))
                         
-                print ("In season progress data saved to database")                    
+                print ("In season progress data saved to database") 
+        if flaggingmaxspeeds:
+            for speed_session in flaggingmaxspeeds:
+                session_name = speed_session['session']
+                session_slug = speed_session['sessionSlug']
+                timing_point_names = speed_session['timingPoints']
+                session_id = speed_session['sessionid']
+                
+                
+                # For each timing point, fetch the max speed data
+                for timing_point in timing_point_names:
+                    if not timing_point:
+                        continue
+                        
+                    max_speed_url = f"https://motorsportstats.com/api/result-statistics?sessionSlug={session_slug}&sessionFact=MaxSpeed&timingPoint={urllib.parse.quote(timing_point)}&size=10000"
+                    max_speed_data = open_json(max_speed_url)
+                    
+                    if not max_speed_data or 'content' not in max_speed_data:
+                        continue
+                    
+                    for speed_entry in max_speed_data['content']:
+                        position = speed_entry.get('position')
+                        car_number = int(speed_entry.get('carNumber', 0))
+                        speed_kph = speed_entry.get('speed')
+                        
+                        # Find matching entrant by car number
+                        matched_entrant = None
+                        for entrant in results:
+                            if entrant['number'] == car_number:
+                                matched_entrant = entrant
+                                break
+                        
+                        if not matched_entrant:
+                            continue
+                        
+                        driver_name = matched_entrant['driver']
+                        constructor_name = matched_entrant['constructor']
+                        engine_name = matched_entrant['engine']
+                        engine_model_name = matched_entrant['enginemodel']
+                        
+                        # Get IDs
+                        driver_id = driverids.get(driver_name)
+                        constructor_id = constructorids.get(constructor_name)
+                        engine_id = engineids.get(engine_name)
+                        engine_model_id = enginemodelids.get(engine_model_name)
+                        
+                        cur.execute("""
+                            INSERT INTO MaxSpeeds (GrandPrixName, Position, Driver, Constructor, Engine, EngineModel, SessionName, TimingPoint, SpeedKph, GrandPrixID, SessionID, DriverID, ConstructorID, EngineID, EngineModelID)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (
+                            gp,
+                            position,
+                            driver_name,
+                            constructor_name,
+                            engine_name,
+                            engine_model_name,
+                            session_name,
+                            timing_point,
+                            speed_kph,
+                            grandprix_id,
+                            session_id,
+                            driver_id,
+                            constructor_id,
+                            engine_id,
+                            engine_model_id
+                        ))   
+            print("Max speeds data saved to database")
+        
+
                                      
         if sxs:
             open_url(f"https://formula1.com{sxs}")
@@ -4505,12 +5280,11 @@ for season in seasons[index:]:
                                 
                 # Try to insert with DurationStoppedInPitBox column, fall back if column doesn't exist
                 cur.execute("""
-                INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, DurationStoppedInPitBox, type, GrandPrixID, DriverID, ConstructorID)
+                INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, DurationStoppedInPitBox, SessionID, GrandPrixID, DriverID, ConstructorID)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (gp, pitstop['carnumber'], pitstop['driver'], pitstop['constructor'], pitstop['stopnumber'], pitstop['lapstopped'], pitstop['durationspentinpitlane'], pitstop['timeinseconds'], pitstop['timeofday'], pitstop['totaltimeforthewholerace'], pitstop['totaltimeinseconds'], duration_stopped_in_pitbox, 'grandprix', grandprix_id, driver_id, constructor_id))
+                (gp, pitstop['carnumber'], pitstop['driver'], pitstop['constructor'], pitstop['stopnumber'], pitstop['lapstopped'], pitstop['durationspentinpitlane'], pitstop['timeinseconds'], pitstop['timeofday'], pitstop['totaltimeforthewholerace'], pitstop['totaltimeinseconds'], duration_stopped_in_pitbox, race_session['id'], grandprix_id, driver_id, constructor_id))
             #print("Pit Stop Summary:", pitstopsummary) 
-
 
         if trigger2 == True:
             driverschampionship, constructorschampionship = parse_championship_results(year, name_map)
@@ -4581,7 +5355,6 @@ cur.execute("UPDATE Drivers SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResu
 cur.execute("UPDATE Drivers SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND racestatus LIKE '%Did not finish%' AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET HatTricks = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND raceposition = 1 AND starting_grid_position = 1 AND fastestlap = 1 AND Drivers.needstatsupdate = 1)")
 cur.execute("UPDATE Drivers SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND starting_grid_position IS NOT NULL AND Drivers.needstatsupdate = 1)")
@@ -4612,8 +5385,9 @@ def get_grand_slam_candidates(cur):
     cur.execute("""
         SELECT L.grandprixid, L.lap, L.driverid, L.position
         FROM LapByLap L
+        JOIN Sessions S ON L.SessionID = S.ID
         JOIN GrandPrixResults G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
-        WHERE L.Type = 'grandprix' AND G.driverid IN (SELECT ID FROM Drivers WHERE needstatsupdate = 1)
+        WHERE S.SessionName = 'Race' AND G.driverid IN (SELECT ID FROM Drivers WHERE needstatsupdate = 1)
     """)
     rows = cur.fetchall()
 
@@ -4673,7 +5447,6 @@ cur.execute("UPDATE Constructors SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPri
 cur.execute("UPDATE Constructors SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND racestatus LIKE '%Did not finish%' AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND starting_grid_position IS NOT NULL AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprintstarting_grid_position IS NOT NULL AND Constructors.needstatsupdate = 1)")
@@ -4700,7 +5473,6 @@ cur.execute("UPDATE Engines SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResu
 cur.execute("UPDATE Engines SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND racestatus LIKE '%Did not finish%' AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND starting_grid_position IS NOT NULL AND Engines.needstatsupdate = 1)")
 cur.execute("UPDATE Engines SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprintstarting_grid_position IS NOT NULL AND Engines.needstatsupdate = 1)")
@@ -4725,7 +5497,6 @@ cur.execute("UPDATE Chassis SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResu
 cur.execute("UPDATE Chassis SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND racestatus LIKE '%Did not finish%' AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND starting_grid_position IS NOT NULL AND Chassis.needstatsupdate = 1)")
 cur.execute("UPDATE Chassis SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprintstarting_grid_position IS NOT NULL AND Chassis.needstatsupdate = 1)")
@@ -4750,7 +5521,6 @@ cur.execute("UPDATE EngineModels SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPri
 cur.execute("UPDATE EngineModels SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND racestatus LIKE '%Did not finish%' AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND starting_grid_position IS NOT NULL AND EngineModels.needstatsupdate = 1)")
 cur.execute("UPDATE EngineModels SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprintstarting_grid_position IS NOT NULL AND EngineModels.needstatsupdate = 1)")
@@ -4841,10 +5611,11 @@ def update_laps_led_for_component(cur, component_table, component_id_column):
     query_gp = f"""
     SELECT G.{component_id_column}, COUNT(*) AS laps_led
     FROM LapByLap AS L
+    JOIN Sessions AS S ON L.SessionID = S.ID
     JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
     JOIN {component_table} AS C ON G.{component_id_column} = C.ID
     WHERE L.position = 1
-      AND L.Type = 'grandprix'
+      AND S.SessionName = 'Race'
       AND G.{component_id_column} IS NOT NULL
       AND C.needstatsupdate = 1
     GROUP BY G.{component_id_column}
@@ -4862,10 +5633,11 @@ def update_laps_led_for_component(cur, component_table, component_id_column):
     query_sprint = f"""
     SELECT G.{component_id_column}, COUNT(*) AS laps_led
     FROM LapByLap AS L
+    JOIN Sessions AS S ON L.SessionID = S.ID
     JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
     JOIN {component_table} AS C ON G.{component_id_column} = C.ID
     WHERE L.position = 1
-      AND L.Type = 'sprint'
+      AND S.SessionName IN ('Sprint', 'Sprint Qualifying')
       AND G.{component_id_column} IS NOT NULL
       AND C.needstatsupdate = 1
     GROUP BY G.{component_id_column}

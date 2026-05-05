@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData"
 ]
 
 for table in tables:
@@ -97,7 +97,8 @@ cursor.execute('''CREATE TABLE Sessions (
     StartTimeinDatetime TEXT,
     EndTimeinDatetime TEXT,
     GrandPrixID INTEGER,
-    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID),
+    UNIQUE (GrandPrixID, SessionNumber)
 )''')
 
 cursor.execute('''CREATE TABLE GrandsPrix (
@@ -559,10 +560,11 @@ cursor.execute('''CREATE TABLE PitStopSummary (
     TotalTimeSpentInPitLane TEXT,
     TotalTimeinSeconds REAL,
     DurationStoppedInPitBox REAL,
-    type TEXT,
+    SessionID INTEGER,
     GrandPrixID INTEGER,
     DriverID INTEGER,
     ConstructorID INTEGER,
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
     FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (DriverID) REFERENCES Drivers(ID),
     FOREIGN KEY (ConstructorID) REFERENCES Constructors(ID)
@@ -571,10 +573,9 @@ cursor.execute('''CREATE TABLE PitStopSummary (
 cursor.execute('''CREATE TABLE LapByLap (
     GrandPrix TEXT,
     Driver TEXT,
+    Session TEXT,          
     Position INTEGER,
     Lap INTEGER,
-    Type TEXT,
-    SafetyCar BOOLEAN,
     Time TEXT,
     TimeInSeconds REAL,
     TyreCompound TEXT,
@@ -584,9 +585,34 @@ cursor.execute('''CREATE TABLE LapByLap (
     Sector3Time REAL,
     TyreAge INTEGER,
     TrackStatus TEXT,
-    QualifyingSegment TEXT,   
+    QualifyingSegment TEXT,
+    SessionLapStartTime TEXT,
+    SessionLapStartTimeInSeconds REAL,
+    SessionLapStartTimeDateTimeUTC TEXT,
+    SessionLapEndTime TEXT,
+    SessionLapEndTimeInSeconds REAL,
+    Sector1EndSessionTime TEXT,  
+    Sector1EndSessionTimeInSeconds REAL,
+    Sector2EndSessionTime TEXT,
+    Sector2EndSessionTimeInSeconds REAL,
+    Sector3EndSessionTime TEXT,
+    Sector3EndSessionTimeInSeconds REAL,
+    SpeedIntermediate1 REAL,
+    SpeedIntermediate2 REAL,
+    SpeedFinishLine REAL,
+    SpeedSpeedTrap REAL,
+    PitInSessionTime TEXT,
+    PitInSessionTimeInSeconds REAL,
+    PitOutSessionTime TEXT,
+    PitOutSessionTimeInSeconds REAL,
+    IfDeletedLap BOOLEAN,
+    DeleteReason TEXT,
+    IfAccurate BOOLEAN,
+    FastF1Generated BOOLEAN,
     GrandPrixID INTEGER,
+    SessionID INTEGER, 
     DriverID INTEGER,
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
     FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (DriverID) REFERENCES Drivers(ID)
 )''')
@@ -685,6 +711,66 @@ cursor.execute('''CREATE TABLE RaceReports (
     RaceReport TEXT,
     FOREIGN KEY (ID) REFERENCES GrandsPrix(ID)
 )''')
+cursor.execute('''CREATE TABLE MaxSpeeds (
+    GrandPrixName TEXT,
+    Position INTEGER,
+    Driver TEXT,
+    Constructor TEXT,
+    Engine TEXT,
+    EngineModel TEXT,
+    SessionName TEXT,
+    TimingPoint TEXT,
+    SpeedKph REAL,
+    GrandPrixID INTEGER,
+    SessionID INTEGER,
+    DriverID INTEGER,
+    ConstructorID INTEGER,
+    EngineID INTEGER,
+    EngineModelID INTEGER,
+    FOREIGN KEY (DriverID) REFERENCES Drivers(ID),
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
+    FOREIGN KEY (ConstructorID) REFERENCES Constructors(ID),
+    FOREIGN KEY (EngineID) REFERENCES Engines(ID),
+    FOREIGN KEY (EngineModelID) REFERENCES EngineModels(ID),
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
+)''')
+
+cursor.execute('''CREATE TABLE RaceControlMessages (
+    GrandPrixName TEXT,
+    SessionName TEXT,
+    TimestampUTC TEXT,
+    Category TEXT,
+    Message TEXT,
+    Status TEXT,
+    Flag TEXT,
+    Scope TEXT,
+    MarshallingSector INTEGER,
+    AffectedDriverNumber INTEGER,
+    Lap INTEGER,
+    GrandPrixID INTEGER,
+    SessionID INTEGER,
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
+)''')
+
+cursor.execute('''CREATE TABLE WeatherData (
+    GrandPrixName TEXT,
+    SessionName TEXT,
+    SessionTimestamp TEXT,
+    SessionTimestampInSeconds REAL,
+    AirTemperatureC REAL,
+    HumidityPercent REAL,
+    AirPressureMbar REAL,
+    IfRainfall BOOLEAN,
+    TrackTemperatureC REAL,
+    WindDirectionDegrees REAL,
+    WindSpeedMs REAL,
+    GrandPrixID INTEGER,
+    SessionID INTEGER,
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
+)''')
+
 
 conn.commit()
 conn.close()
