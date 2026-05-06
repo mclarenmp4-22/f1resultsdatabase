@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 import pandas as pd
 import warnings
+from timezonefinder import TimezoneFinder
+from zoneinfo import ZoneInfo
 import fastf1
 
 
@@ -23,6 +25,33 @@ warnings.filterwarnings("ignore", category=UserWarning)
 conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
+
+timezone_finder = TimezoneFinder()
+
+def get_timezone_from_coords(lat, lng):
+    if lat is None or lng is None:
+        return None
+    try:
+        return timezone_finder.timezone_at(lng=float(lng), lat=float(lat))
+    except Exception:
+        try:
+            return timezone_finder.closest_timezone_at(lng=float(lng), lat=float(lat))
+        except Exception:
+            return None
+
+
+def build_local_datetime(timestamp_seconds, timezone_name):
+    if timestamp_seconds is None:
+        return None
+    if timezone_name:
+        try:
+            tz = ZoneInfo(timezone_name)
+            utc_dt = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=timestamp_seconds)
+            return utc_dt.astimezone(tz)
+        except Exception:
+            pass
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=timestamp_seconds)
+
 
 def normalize_name(name):
   """
@@ -102,6 +131,48 @@ def open_json(url):
             if retries == 3:
                 raise RuntimeError (f"Failed to open URL {url} due to error {e} after 3 retries.")
             time.sleep(1)
+
+
+def sprint_pitstop_slug_candidates(session_slug, year):
+    candidates = []
+    if session_slug:
+        candidates.append(session_slug)
+
+        if year in (2021, 2022):
+            if session_slug.endswith("_sprint"):
+                candidates.append(session_slug[:-7] + "_sprint-qualifying")
+            elif session_slug.endswith("_sprint-qualifying"):
+                candidates.append(session_slug[:-19] + "_sprint")
+
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def fetch_sprint_pitstop_content(session_slug, year):
+    last_error = None
+    for candidate_slug in sprint_pitstop_slug_candidates(session_slug, year):
+        url = (
+            "https://motorsportstats.com/api/result-statistics"
+            f"?sessionSlug={candidate_slug}&sessionFact=PitStop&size=100000"
+        )
+        try:
+            response = open_json(url)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        content = response.get('content') or []
+        if content:
+            return content
+
+    if last_error is not None:
+        print(f"Unable to fetch sprint pit stops for session slug {session_slug}: {last_error}")
+    return []
 
 
 def safe_int(value):
@@ -233,6 +304,7 @@ def upsert_session_record(cursor, grandprix_name, session_data, grandprix_id):
         session_data['enddtutc'],
         session_data['startdt'],
         session_data['enddt'],
+        session_data.get('timezone'),
         grandprix_id,
     )
 
@@ -246,21 +318,37 @@ def upsert_session_record(cursor, grandprix_name, session_data, grandprix_id):
     if existing_row:
         session_id = existing_row[0]
         cursor.execute(
-            """UPDATE Sessions
-               SET GrandPrix = ?, SessionName = ?, SessionNumber = ?, WasSessionCancelled = ?,
-                   StartTimeTimestampUTC = ?, EndTimeTimestampUTC = ?, StartTimeTimestamp = ?,
-                   EndTimeTimestamp = ?, IfPreciseStartTime = ?, StartTimeinDatetimeUTC = ?,
-                   EndTimeinDatetimeUTC = ?, StartTimeinDatetime = ?, EndTimeinDatetime = ?,
-                   GrandPrixID = ?
+            """SELECT GrandPrix, SessionName, SessionNumber, WasSessionCancelled,
+                    StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp,
+                    EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC,
+                    EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime,
+                    SessionTimezone, GrandPrixID
+               FROM Sessions
                WHERE ID = ?""",
-            values + (session_id,)
+            (session_id,)
         )
+        existing_values = cursor.fetchone()
+        if existing_values:
+            merged_values = [old_value if new_value is None else new_value
+                             for new_value, old_value in zip(values, existing_values)]
+            merged_values.append(session_id)
+            cursor.execute(
+                """UPDATE Sessions
+                   SET GrandPrix = ?, SessionName = ?, SessionNumber = ?, WasSessionCancelled = ?,
+                       StartTimeTimestampUTC = ?, EndTimeTimestampUTC = ?, StartTimeTimestamp = ?,
+                       EndTimeTimestamp = ?, IfPreciseStartTime = ?, StartTimeinDatetimeUTC = ?,
+                       EndTimeinDatetimeUTC = ?, StartTimeinDatetime = ?, EndTimeinDatetime = ?,
+                       SessionTimezone = ?, GrandPrixID = ?
+                   WHERE ID = ?""",
+                tuple(merged_values)
+            )
+            return session_id
         return session_id
 
     cursor.execute(
         """INSERT INTO Sessions (GrandPrix, SessionName, SessionNumber, WasSessionCancelled, StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp,
-                    EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC, EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime, GrandPrixID)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC, EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime, SessionTimezone, GrandPrixID)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         values
     )
     return cursor.lastrowid
@@ -272,7 +360,7 @@ def ensure_combined_qualifying_session(cursor, grandprix_name, grandprix_id, yea
         SELECT ID, SessionName, SessionNumber, WasSessionCancelled,
                StartTimeTimestampUTC, EndTimeTimestampUTC, StartTimeTimestamp,
                EndTimeTimestamp, IfPreciseStartTime, StartTimeinDatetimeUTC,
-               EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime
+               EndTimeinDatetimeUTC, StartTimeinDatetime, EndTimeinDatetime, SessionTimezone
         FROM Sessions
         WHERE GrandPrixID = ?
         ORDER BY SessionNumber, ID
@@ -327,6 +415,7 @@ def ensure_combined_qualifying_session(cursor, grandprix_name, grandprix_id, yea
         'enddtutc': last_non_null(10),
         'startdt': first_non_null(11),
         'enddt': last_non_null(12),
+        'timezone': first_non_null(13),
     }
     upsert_session_record(cursor, grandprix_name, synthetic_session, grandprix_id)
 
@@ -4194,10 +4283,8 @@ if cur.fetchone()[0] == 0:
             twd = v['href']
             open_url(f'https://www.statsf1.com/{twd}')
             a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
-            coord_str = a_tag[a_tag.index('@') + 1 : a_tag.rindex(',')]
-            lat = coord_str[:coord_str.index(',')]
-            lng = coord_str[coord_str.index(',') + 1:]  
-            mappings[v.get_text(strip=True)] = (lat, lng)
+            coord_str = re.search(r'@([^,]+),([^,]+)', a_tag).groups()
+            lat, lng = coord_str
             circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
             for layoutdiv in circuitlayoutdivs:
                 circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
@@ -4385,6 +4472,7 @@ for season in seasons[index:]:
         race_info = parse_race_info(str(raceinfo), theneeded)
         if race_info['track_name'] in mappings.keys():
             race_info['latitude'], race_info['longitude'] = mappings[race_info['track_name']]
+            race_info['timezone'] = get_timezone_from_coords(race_info['latitude'], race_info['longitude'])
             #If this is being updated, not reset, and this start off from the last grand prix, then we check if there are new circuit layouts for the circuit since the last grand prix, and if there are, we add them to the database.
             if race_info['race_number'] > last_grandprix_id > 1150: 
                 #temporary solution. 1149 is the 2025 Abu Dhabi Grand Prix, which is the last grand prix in the database currently, 
@@ -4418,6 +4506,8 @@ for season in seasons[index:]:
             lat = coord_str[:coord_str.index(',')]
             lng = coord_str[coord_str.index(',') + 1:]  
             mappings[race_info['track_name']] = (lat, lng)
+            race_info['latitude'], race_info['longitude'] = lat, lng
+            race_info['timezone'] = get_timezone_from_coords(lat, lng)
             print(f"Processing circuit: {race_info['track_name']}")
             circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
             for layoutdiv in circuitlayoutdivs:
@@ -4493,6 +4583,7 @@ for season in seasons[index:]:
         dest = []
         lapchartstoberead = []
         flaggingmaxspeeds = []
+        sprint_session_slug = None
         for s in info:
             ix += 1
             tde = {
@@ -4507,8 +4598,9 @@ for season in seasons[index:]:
                 'precisestarttime': s['preciseStartTime'],
                 'startdtutc': datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=s['startTimeUtc']) if s['startTimeUtc'] else None,
                 'enddtutc': datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=s['endTimeUtc']) if s['endTimeUtc'] else None,
-                'startdt': datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=s['startTime']) if s['startTime'] else None,
-                'enddt': datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=s['endTime']) if s['endTime'] else None,  
+                'startdt': build_local_datetime(s['startTime'], race_info.get('timezone')) if s['startTime'] else None,
+                'enddt': build_local_datetime(s['endTime'], race_info.get('timezone')) if s['endTime'] else None,
+                'timezone': race_info.get('timezone'),
             }
             if "Sprint Shootout" in tde['name'] and year >= 2024:
                 tde['name'] = tde['name'].replace('Sprint Shootout', 'Sprint Qualifying')
@@ -4519,8 +4611,9 @@ for season in seasons[index:]:
                     timing_points = open_json(f"https://motorsportstats.com/api/timing-points?sessionSlug={tde['openurl']}")
                     flaggingmaxspeeds.append({'session': tde['name'], 'sessionSlug': tde['openurl'], 'timingPoints': timing_points, 'sessionid': session_id})             
             openurl = tde['openurl']
-            if 'sprint' in openurl:
-                sopenurl = openurl
+            canonical_session_key = normalize_session_name_for_race_control(tde['name'], year)
+            if canonical_session_key == 'sprint':
+                sprint_session_slug = openurl
             
             if not tde['wassessioncancelled']:
                 if 'qualifying' in openurl:
@@ -5147,8 +5240,8 @@ for season in seasons[index:]:
                         instance['time'] = time_val
                         instance['time_in_seconds'] = time_in_sec
                         insert_lap_by_lap_row(cur, gp, instance['driver'], sprint_session['name'], sprint_session['id'], instance, grandprix_id, driver_id)
-                    if "PitStop" in open_json(f"https://motorsportstats.com/api/result-statistics?{sopenurl}"):        
-                        sprintpitstopsummaryjson = open_json(f"https://motorsportstats.com/api/result-statistics?sessionSlug={sopenurl}&sessionFact=PitStop&size=100000")['content'] 
+                    if sprint_session_slug:
+                        sprintpitstopsummaryjson = fetch_sprint_pitstop_content(sprint_session_slug, year)
                         for pitstop in sprintpitstopsummaryjson:
                             for entrant in results:
                                 if entrant['number'] == int(pitstop['carNumber']):
@@ -5162,10 +5255,10 @@ for season in seasons[index:]:
                                     duration = float(Decimal(str(pitstop['duration'] / 1000)).quantize(Decimal('0.001'))) if pitstop.get('duration') is not None else None
                                     totalduration = float(Decimal(str(pitstop['totalDuration'] / 1000)).quantize(Decimal('0.001'))) if pitstop.get('totalDuration') is not None else None
                                     cur.execute("""
-                                    INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, SessionID, GrandPrixID, DriverID, ConstructorID)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                    INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, SessionName, SessionID, GrandPrixID, DriverID, ConstructorID)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                                     """,
-                                    (gp, entrant['number'], driver_name, entrant['constructor'], stopnumber, lap, duration, duration, timeofday, totalduration, totalduration, sprint_session['id'], grandprix_id, driver_id, constructor_id))
+                                    (gp, entrant['number'], driver_name, entrant['constructor'], stopnumber, lap, duration, duration, timeofday, totalduration, totalduration, sprint_session['name'], sprint_session['id'], grandprix_id, driver_id, constructor_id))
                                     break
                 #print (lapbylap)  
                 #print (name_map)  
@@ -5280,10 +5373,10 @@ for season in seasons[index:]:
                                 
                 # Try to insert with DurationStoppedInPitBox column, fall back if column doesn't exist
                 cur.execute("""
-                INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, DurationStoppedInPitBox, SessionID, GrandPrixID, DriverID, ConstructorID)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO PitStopSummary (GrandPrix, Number, Driver, Constructor, StopNumber, Lap, DurationSpentInPitLane, TimeInSeconds, TimeOfDayStopped, TotalTimeSpentInPitLane, TotalTimeinSeconds, DurationStoppedInPitBox, SessionName, SessionID, GrandPrixID, DriverID, ConstructorID)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (gp, pitstop['carnumber'], pitstop['driver'], pitstop['constructor'], pitstop['stopnumber'], pitstop['lapstopped'], pitstop['durationspentinpitlane'], pitstop['timeinseconds'], pitstop['timeofday'], pitstop['totaltimeforthewholerace'], pitstop['totaltimeinseconds'], duration_stopped_in_pitbox, race_session['id'], grandprix_id, driver_id, constructor_id))
+                (gp, pitstop['carnumber'], pitstop['driver'], pitstop['constructor'], pitstop['stopnumber'], pitstop['lapstopped'], pitstop['durationspentinpitlane'], pitstop['timeinseconds'], pitstop['timeofday'], pitstop['totaltimeforthewholerace'], pitstop['totaltimeinseconds'], duration_stopped_in_pitbox, race_session['name'], race_session['id'], grandprix_id, driver_id, constructor_id))
             #print("Pit Stop Summary:", pitstopsummary) 
 
         if trigger2 == True:

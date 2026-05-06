@@ -112,6 +112,16 @@ If, for whatever reason, you want to wipe out all the data in the database or yo
 python reset.py
 ```
 
+## Backfill sprint pit stops:
+If sprint pit stop rows are missing, fetch and insert them for every sprint session already in your database:
+```bash
+python backfill_sprint_pitstops.py
+```
+To preview what would be inserted without changing the database:
+```bash
+python backfill_sprint_pitstops.py --dry-run
+```
+
 ## Delete a specific season:
 If you want to delete data for a single season (e.g. to re-scrape it), run:
 ```bash
@@ -354,6 +364,7 @@ python deleterace.py <race_name>
    - **EndTimeinDatetimeUTC**: End time in UTC datetime string. _TEXT_
    - **StartTimeinDatetime**: Start time in local datetime string. _TEXT_
    - **EndTimeinDatetime**: End time in local datetime string. _TEXT_
+   - **SessionTimezone**: IANA timezone identifier derived from circuit latitude/longitude (e.g. `Europe/London`). _TEXT_
    - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
 
 6. ### Drivers
@@ -805,11 +816,12 @@ python deleterace.py <race_name>
     - **Lap**: Lap of the stop. _INTEGER_
     - **DurationSpentInPitLane**: Duration in _pit lane_. Not to be confused as the duration stationary in the pit stop _TEXT_
     - **TimeInSeconds**: Duration in seconds. _REAL_
-    - **TimeOfDayStopped**: Time of day. _TEXT_
+    - **TimeOfDayStopped**: Time of day in local track time. _TEXT_
     - **TotalTimeSpentInPitLane**: Total pit lane time (all the stops combined till that point). _TEXT_
     - **TotalTimeinSeconds**: Total pit lane time in seconds. _REAL_
     - **DurationStoppedInPitBox**: Duration stationary in the pit box. _REAL_
     - **type**: Type of pit stop, such as a normal tyre stop or another kind of service stop. _TEXT_
+    - **SessionName**: Name of the session the pit stop belongs to, such as `Race`, `Sprint`, or `Sprint Qualifying`. _TEXT_
     - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
     - **DriverID**: Foreign key to Drivers. _INTEGER_
     - **ConstructorID**: Foreign key to Constructors. _INTEGER_
