@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 Miami Grand Prix**
+**Last updated: 2026 Canadian Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -281,6 +281,16 @@ python deleterace.py <race_name>
    - **TotalEngineModels**: Total number of engine models used in World Championship Grands Prix in that season. _INTEGER DEFAULT 0_
    - **TotalChassis**: Total number of chassis to have entered a World Championship Grand Prix in that season. _INTEGER DEFAULT 0_
    - **TotalNationalities**: Total number of nationalities represented by drivers in that season. _INTEGER DEFAULT 0_
+   - **TotalUniqueWinners**: Total number of different drivers to win at least one race in that season. _INTEGER DEFAULT 0_
+   - **TotalFirstTimeWinners**: Total number of drivers to score their first-ever race win in that season. _INTEGER DEFAULT 0_
+   - **TotalUniquePodiumFinishers**: Total number of different drivers to finish on the podium (1st-3rd) at least once in that season. _INTEGER DEFAULT 0_
+   - **TotalFirstTimePodiumFinishers**: Total number of drivers to score their first-ever podium finish in that season. _INTEGER DEFAULT 0_
+   - **TotalUniquePolePositions**: Total number of different drivers to secure pole position at least once in that season. _INTEGER DEFAULT 0_
+   - **TotalFirstTimePoleSitters**: Total number of drivers to score their first-ever pole position in that season. _INTEGER DEFAULT 0_
+   - **TotalUniqueFastestLapGetters**: Total number of different drivers to set the fastest lap at least once in that season. _INTEGER DEFAULT 0_
+   - **TotalFirstTimeFastestLapGetters**: Total number of drivers to score their first-ever fastest lap in that season. _INTEGER DEFAULT 0_
+   - **TotalDriversWithPoints**: Total number of different drivers to score championship points in that season. _INTEGER DEFAULT 0_
+   - **TotalFirstTimePointsScorers**: Total number of drivers to score championship points for the first time in that season. _INTEGER DEFAULT 0_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 2. ### Circuits
@@ -408,6 +418,10 @@ python deleterace.py <race_name>
    - **NationalityID**: Foreign key to Nationalities. _INTEGER_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+   - **Gender**: Gender of that driver. _TEXT_
+   - **DeathDate**: If the driver has passed away, the date of death.  _TEXT_,
+   - **DeathAge**: If the driver has passed away, the age at death. _INTEGER_,
+   - **DeathReason**: If the driver has passed away and reason is available, the cause of death. _TEXT_,
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
    - **indy500only**: Whether this driver only competed in Indianapolis 500 races. Set to 1 (true) if all races ended with "Indianapolis 500", otherwise 0 (false). _BOOLEAN_
 
@@ -1084,6 +1098,8 @@ We are working on adding more features to the database to make it even more comp
 - Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
 - Make `writedb.py` more efficient. Currently a lot of the code is O(n²) and can be optimised.
 - Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
+- We would also like to use agentic scraping to scrape multiple websites for race reports.
+- Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
 
 We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
 

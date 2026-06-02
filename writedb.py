@@ -17,6 +17,7 @@ import warnings
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 import fastf1
+from deep_translator import GoogleTranslator
 
 
 # Suppress technical warnings
@@ -797,6 +798,115 @@ def fetch_driver_info(driver_name):
     return nationality, birthdate
 
 
+def translate_reason(text):
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # Try DeepL / Deepl first (import dynamically), fall back to Google
+    try:
+        try:
+            from deep_translator import DeeplTranslator as DeepLTranslator
+        except Exception:
+            from deep_translator import DeepLTranslator as DeepLTranslator
+        translated = DeepLTranslator(source='auto', target='en').translate(text)
+        if translated:
+            return translated
+    except Exception:
+        pass
+    try:
+        translated = GoogleTranslator(source='auto', target='en').translate(text)
+        return translated
+    except Exception:
+        return text
+
+
+def fetch_deaths_from_statsf1():
+    url = 'https://www.statsf1.com/en/statistiques/pilote/divers/decede.aspx'
+    open_url(url)
+
+    table = soup.find('table', id='ctl00_CPH_Main_GV_Stats')
+    if not table:
+        # Try finding by class
+        table = soup.find('table', class_='sortable')
+    if not table:
+        return []
+
+    rows = table.find_all('tr')
+    deaths = []
+    for tr in rows[1:-1]:
+        cells = tr.find_all('td')
+        if len(cells) < 4:
+            continue
+        name = cells[0].get_text(strip=True)
+        date_text = cells[1].get_text(strip=True)
+        age_text = cells[2].get_text(strip=True)
+        reason_text = cells[3].get_text(strip=True)
+
+        # Parse date (e.g., '4 may 2026') — be forgiving if empty or unexpected
+        death_date = None
+        # Normalize whitespace and NBSPs
+        date_text_clean = unicodedata.normalize('NFKC', date_text).replace('\xa0', ' ').strip()
+        if date_text_clean:
+            try:
+                death_date = datetime.datetime.strptime(date_text_clean.title(), "%d %B %Y").strftime('%Y-%m-%d')
+            except Exception:
+                try:
+                    death_date = datetime.datetime.strptime(date_text_clean, "%d/%m/%Y").strftime('%Y-%m-%d')
+                except Exception as exc:
+                    print(f"Warning: failed to parse death date '{date_text}' for '{name}': {exc}")
+                    death_date = None
+
+        death_age = None
+        m = re.search(r'(\d+)', age_text)
+        if m:
+            try:
+                death_age = int(m.group(1))
+            except Exception:
+                death_age = None
+
+        reason_raw = reason_text if reason_text and reason_text.strip() else None
+
+        deaths.append({
+            'name': name,
+            'date': death_date,
+            'age': death_age,
+            'reason_raw': reason_raw
+        })
+
+    return deaths
+
+
+def update_deaths_db(cursor, conn):
+
+    cursor.execute("SELECT ID, Name, DeathDate FROM Drivers")
+    db_rows = cursor.fetchall()
+    db_map = {normalize_name(r[1]): (r[0], r[1], r[2]) for r in db_rows}
+
+    deaths = fetch_deaths_from_statsf1()
+    for item in deaths:
+        name = item['name']
+        norm = normalize_name(format_name_from_caps(name))
+        date = item['date']
+        age = item['age']
+        reason_raw = item.get('reason_raw')
+
+        if norm in db_map:
+            driver_id, db_name, existing_date = db_map[norm]
+            if not existing_date and date:
+                reason_translated = translate_reason(reason_raw) if reason_raw else None
+                cursor.execute("UPDATE Drivers SET DeathDate = ?, DeathAge = ?, DeathReason = ? WHERE ID = ?",
+                               (date, age, reason_translated, driver_id))
+                conn.commit()
+                print(f"New death recorded: {db_name} ({date})")
+            elif existing_date and existing_date != date:
+                reason_translated = translate_reason(reason_raw) if reason_raw else None
+                cursor.execute("UPDATE Drivers SET DeathDate = ?, DeathAge = ?, DeathReason = ? WHERE ID = ?",
+                               (date, age, reason_translated, driver_id))
+                conn.commit()
+                print(f"Updated death info for: {db_name} ({date})")
+
 #This function parses the points system from the statsf1.com seasons page.
 def parse_points_system(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -1484,6 +1594,7 @@ def parse_regulations(html_content):
 
 
 def format_name_from_caps(raw_name):
+    raw_name = (raw_name or "").strip()
     # Special case mappings for known corrections
     name_corrections = {
         "GIMMI BRUNI": "Gianmaria Bruni",
@@ -1498,8 +1609,30 @@ def format_name_from_caps(raw_name):
     for pattern, replacement in name_corrections.items():
         if raw_name.upper().replace("*", '') == pattern.upper():
             return replacement
-    
-    parts = raw_name.split()
+
+    tokens = raw_name.split()
+    def is_surname_like_token(token):
+        letters = re.sub(r'[^A-Za-z]', '', token)
+        if not letters:
+            return False
+        if letters == letters.upper():
+            return True
+        if len(letters) > 2 and letters[0].isupper() and any(ch.isupper() for ch in letters[1:]):
+            return True
+        return False
+
+    if len(tokens) > 1:
+        trailing_given = []
+        for token in reversed(tokens):
+            if is_surname_like_token(token):
+                break
+            trailing_given.insert(0, token)
+
+        surname_block = tokens[:len(tokens) - len(trailing_given)]
+        if trailing_given and surname_block and any(is_surname_like_token(tok) for tok in surname_block):
+            tokens = trailing_given + surname_block
+
+    parts = tokens
     formatted = []
 
     for part in parts:
@@ -1545,6 +1678,54 @@ def format_subpart(subpart):
         subpart = "Mac" + subpart[3].upper() + subpart[4:]
     
     return subpart
+
+
+_FEMALE_DRIVERS_CACHE = None
+
+def fetch_female_drivers():
+    """Fetch list of female drivers from statsf1 and return a set of normalized names."""
+    global _FEMALE_DRIVERS_CACHE
+    if _FEMALE_DRIVERS_CACHE is not None:
+        return _FEMALE_DRIVERS_CACHE
+    url = 'https://www.statsf1.com/en/statistiques/pilote/divers/femmes.aspx'
+    try:
+        open_url(url)
+        table = soup.find('table', id='ctl00_CPH_Main_GV_Stats') or soup.find('table', class_='sortable')
+        if not table:
+            _FEMALE_DRIVERS_CACHE = set()
+            return _FEMALE_DRIVERS_CACHE
+        rows = table.find_all('tr')
+        names = set()
+        for tr in rows[1:-1]:
+            cols = tr.find_all('td')
+            if not cols:
+                continue
+            a = cols[1].find('a') if len(cols) > 1 else cols[0].find('a')
+            if not a:
+                continue
+            raw = a.get_text(strip=True)
+            try:
+                formatted = format_name_from_caps(raw)
+            except Exception:
+                formatted = raw
+            names.add(normalize_name(formatted))
+        _FEMALE_DRIVERS_CACHE = names
+        return names
+    except Exception:
+        _FEMALE_DRIVERS_CACHE = set()
+        return _FEMALE_DRIVERS_CACHE
+
+
+def is_female_driver(name):
+    """Return True if driver is listed on statsf1 women page."""
+    try:
+        formatted = format_name_from_caps(name)
+        return normalize_name(formatted) in fetch_female_drivers()
+    except Exception:
+        return False
+
+
+update_deaths_db(cur, conn)
 
 
 def parse_race_info(html_content, someelements):
@@ -4725,11 +4906,24 @@ for season in seasons[index:]:
                 cur.execute("INSERT OR IGNORE INTO Nationalities (Nationality, FirstGrandPrix, FirstGrandPrixID) VALUES (?, ?, ?)", (nationality, first_grandprix, first_grandprix_id))
                 cur.execute("SELECT ID FROM Nationalities WHERE Nationality = ?", (nationality,))
                 nationality_id = cur.fetchone()[0]                     
-                # Insert into drivers table
+                # Ensure Gender column exists, then insert into drivers table
+                cur.execute("PRAGMA table_info(Drivers)")
+                _cols = [r[1] for r in cur.fetchall()]
+                if 'Gender' not in _cols:
+                    try:
+                        cur.execute("ALTER TABLE Drivers ADD COLUMN Gender TEXT")
+                    except Exception:
+                        pass
+                gender = None
+                try:
+                    gender = 'female' if is_female_driver(result['driver']) else 'male'
+                except Exception:
+                    gender = None
+
                 cur.execute("""
-                    INSERT INTO Drivers (name, nationality, birthdate, FirstGrandPrix, FirstGrandPrixID, NationalityID)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (result['driver'], nationality, birthdate, first_grandprix, first_grandprix_id, nationality_id))          
+                    INSERT INTO Drivers (name, nationality, birthdate, FirstGrandPrix, FirstGrandPrixID, NationalityID, Gender)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (result['driver'], nationality, birthdate, first_grandprix, first_grandprix_id, nationality_id, gender))          
                 cur.execute('UPDATE Nationalities SET DriverCount = DriverCount + 1 WHERE ID = ?', (nationality_id,))
             else:
                 driver_firstgrandprix = cur.execute("SELECT FirstGrandPrix FROM Drivers WHERE Name = ?", (result['driver'],)).fetchone()[0]
@@ -5470,6 +5664,25 @@ cur.execute("UPDATE Seasons SET TotalTeams = (SELECT COUNT(DISTINCT teamid) FROM
 cur.execute("UPDATE Seasons SET TotalEngineModels = (SELECT COUNT(DISTINCT enginemodelid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
 cur.execute("UPDATE Seasons SET TotalChassis = (SELECT COUNT(DISTINCT chassisid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
 cur.execute("UPDATE Seasons SET TotalNationalities = (SELECT COUNT(DISTINCT nationalityid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueWinners = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND raceposition = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniquePodiumFinishers = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND raceposition <= 3) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniquePolePositions = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND qualifyingposition = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueFastestLapGetters = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND fastestlap = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalDriversWithPoints = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND (racepoints > 0 OR sprintpoints > 0)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimePointsScorers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND (gr.racepoints > 0 OR gr.sprintpoints > 0) AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND (racepoints > 0 OR sprintpoints > 0))) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeWinners = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.raceposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND raceposition = 1)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimePodiumFinishers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.raceposition <= 3 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND raceposition <= 3)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimePoleSitters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.qualifyingposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND qualifyingposition = 1)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeFastestLapGetters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.fastestlap = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND fastestlap = 1)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueSprintWinners = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintposition = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueSprintPodiumFinishers = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintposition <= 3) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueSprintPolePositions = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprint_qualifyingposition = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalUniqueSprintFastestLapGetters = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintfastestlap = 1) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalDriversWithSprintPoints = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintpoints > 0) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeSprintWinners = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintposition = 1)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeSprintPodiumFinishers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintposition <= 3 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintposition <= 3)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeSprintPoleSitters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprint_qualifyingposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprint_qualifyingposition = 1)) WHERE needstatsupdate = 1")
+cur.execute("UPDATE Seasons SET TotalFirstTimeSprintFastestLapGetters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintfastestlap = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintfastestlap = 1)) WHERE needstatsupdate = 1")
 
 print("Seasons stats updated.")
 

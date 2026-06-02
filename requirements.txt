@@ -3,3 +3,4 @@ opencv-python
 numpy
 fastf1
 timezonefinder
+deep_translator
