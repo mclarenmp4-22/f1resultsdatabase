@@ -34,7 +34,7 @@ This is the most comprehensive F1 database with:
 - **Accurate historical data**: Includes shared car results, pre-qualifying, and vintage scoring systems.
 - **Pit stop summary**: Includes pit stop data from 1983 onwards, including pit stop times from 2018 onwards.
 - **Technical Regulations**: Season-by-season rules on engines, weight, fuel, and more.
-- **Circuit Metadata**: coordinates and SVG layout paths for every circuit configuration in history.
+- **Circuit Metadata**: coordinates, elevation, country, and SVG layout paths for every circuit configuration in history.
 - **Comprehensive Penalties**: A full database of penalties with official reasons and serving types.
 - **In-Season Progress**: Track the championship standings race-by-race.
 - **Race Reports**: Narrative reports for every Grand Prix, from Wikipedia.
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 Canadian Grand Prix**
+**Last updated: 2026 Monaco Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -110,16 +110,6 @@ Race names are matched case-insensitively. This command updates only the `RaceRe
 If, for whatever reason, you want to wipe out all the data in the database or you want to create the database with all the tables and columns, run this command:
 ```bash
 python reset.py
-```
-
-## Backfill sprint pit stops:
-If sprint pit stop rows are missing, fetch and insert them for every sprint session already in your database:
-```bash
-python backfill_sprint_pitstops.py
-```
-To preview what would be inserted without changing the database:
-```bash
-python backfill_sprint_pitstops.py --dry-run
 ```
 
 ## Delete a specific season:
@@ -314,6 +304,8 @@ python deleterace.py <race_name>
    - **ID**: Unique layout ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
    - **Latitude**: GPS Latitude. _REAL_
    - **Longitude**: GPS Longitude. _REAL_
+   - **Elevation**: Terrain elevation from sea level from Open-Meteo, in metres. _REAL_
+   - **Country**: Country returned by reverse geocoding the circuit coordinates. _TEXT_
    - **CircuitVersion**: Version number of the layout for the given location. _TEXT_
    - **FirstGrandPrix**: Name of the first GP held on this layout. _TEXT_
    - **LastGrandPrix**: Name of the last GP held on this layout. _TEXT_
@@ -334,6 +326,7 @@ python deleterace.py <race_name>
    - **GrandPrixName**: Name of the Grand Prix. This does not refer to the Grand Prix's name alone, i.e. "Monaco Grand Prix". Instead, it refers to the full name of the Grand Prix, e.g. "2021 Monaco Grand Prix". This must be kept in mind for all tables that reference Grand Prix names. _TEXT_
    - **RoundNumber**: Round number in the season. For example, if a race was the seventeenth Grand Prix of the season, the value would be "17".  _INTEGER_
    - **CircuitName**: Name of the circuit. _TEXT_
+   - **Country**: Country of the Grand Prix venue. _TEXT_
    - **Date**: Date of the Grand Prix. For example, "Sunday, 2 August 2020" _TEXT_
    - **DateInDateTime**: Date as datetime. _TEXT_
    - **Laps**: Number of laps the race was held. _INTEGER_
@@ -474,6 +467,7 @@ python deleterace.py <race_name>
    - **SprintPodiums**: Number of sprint podiums. _INTEGER_
    - **SprintPoles**: Number of sprint pole positions. _INTEGER_
    - **SprintFastestLaps**: Number of sprint fastest laps. _INTEGER_
+   - **OneTwos**: Number of "1-2" finishes (both cars of the constructor finished 1st and 2nd). _INTEGER_
    - **Championships**: Number of championships of that constructor. _INTEGER_
    - **SeasonsRaced**: Number of seasons in which that constructor entered at least one World Championship Grand Prix weekend. _INTEGER_
    - **Points**: Total points of that constructor. _REAL_
@@ -493,6 +487,21 @@ python deleterace.py <race_name>
    - **BestChampionshipPosition**: Best championship position of that constructor. _INTEGER_
    - **FirstGrandPrix**: First Grand Prix of that constructor. _TEXT_
    - **LastGrandPrix**: Last Grand Prix of that constructor. _TEXT_
+   - **Nationalities**: List of nationalities (registered in) along with stints of that constructor. (JSON) _TEXT_
+   - **Filiation**: Timeline of the team in its various avatars along with stints of that constructor. (JSON) _TEXT_
+   - **TeamPrincipals**: Team principals of that constructor. (JSON) _TEXT_
+   
+   Here is Lotus' entries of `Nationalities`, `Filiation`, and `TeamPrincipals` to illustrate the format:
+   ```
+   Nationalities:
+   [["United Kingdom", null], ["Malaysia", 2010], ["United Kingdom", 2012]]
+
+   Filiation: 
+   [[{"Lotus": "1958-1994"}], [{"Lotus": "2010-2011"}, {"Caterham": "2012-2014"}], [{"Toleman": "1981-1985"}, {"Benetton": "1986-2001"}, {"Renault": "2002-2011"}, {"Lotus": "2012-2015"}, {"Renault": "2016-2020"}, {"Alpine": "2021-"}]]
+
+   TeamPrincipals:
+   [[{"Colin Chapman": "1958-1982"}, {"Peter Warr": "1983-1989"}, {"Rupert Manwaring": "1989-1990"}, {"Peter Collins": "1991-1994"}], [{"Tony Fernandes": "2010-2011"}], [{"Éric Boullier": "2012-2013"}, {"Gérard Lopez": "2014-2015"}]]
+   ```
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
@@ -577,6 +586,10 @@ python deleterace.py <race_name>
     - **ConstructorName**: Name of the constructor that made that chasis. _TEXT_
     - **ChassisName**: Name of the chassis. _TEXT UNIQUE_
     - **ConstructorID**: Foreign key to Constructors. _INTEGER_
+    - **EngineMakesUsed** List of engine makes used (JSON) _TEXT_,
+    - **TyresUsed** List of tyres used (JSON)  _TEXT_,
+    - **Designers** List of designers along with departments (JSON) _TEXT_,
+    - **EngineModelsUsed** List of engine models used (JSON) _TEXT_,
     - **Wins**: Number of wins of that chassis. _INTEGER_
     - **Podiums**: Number of podiums of that chassis. _INTEGER_
     - **Poles**: Number of pole positions of that chassis. _INTEGER_
@@ -1081,6 +1094,26 @@ This table contains the weather data for each race. Data is available from 2018 
 - **WindSpeedMs**: Wind speed in metres per second. _REAL_
 - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
 - **SessionID**: Foreign key to Sessions. _INTEGER_
+
+25. ### FamilyRelations:
+This table contains family relationships between drivers in Formula 1 history. Each relationship is stored bidirectionally (e.g. Jacques Villeneuve is Gilles Villeneuve' son, then both "Jacques Villeneuve is Gilles Villeneuve's son" and "Gilles Villeneuve is Jacques Villeneuve's father" are stored).
+
+**Columns:**
+
+- **ID**: Unique family relation ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+- **Driver**: Name of the driver. _TEXT_
+- **RelatedDriver**: Name of the related driver. _TEXT_
+- **RelationType**: Type of relationship (e.g., "Father", "Son", "Brother", "Sister", "Uncle", "Nephew", "Grandfather", "Grandson", "Half-Brother", "Great Uncle"). _TEXT_
+- **DriverID**: Foreign key to Drivers table. _INTEGER_
+- **RelatedDriverID**: Foreign key to Drivers table. _INTEGER_
+- **UNIQUE constraint**: (DriverID, RelatedDriverID) to prevent duplicate relationships.
+
+**Example relationships:**
+- Jacques Villeneuve Villeneuve → Gilles Villeneuve Villeneuve: "Son"
+- Gilles Villeneuve Villeneuve → Jacques Villeneuve Villeneuve: "Father"
+- Michael Schumacher → Ralf Schumacher: "Brother"
+- Ralf Schumacher → Michael Schumacher: "Brother"
+
 
 ## Roadmap:
 We are working on adding more features to the database to make it even more comprehensive. Some of the features and/or changes we want to add in the future include:

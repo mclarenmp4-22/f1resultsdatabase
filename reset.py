@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations"
 ]
 
 for table in tables:
@@ -87,6 +87,8 @@ cursor.execute('''CREATE TABLE CircuitLayouts (
     ID INTEGER PRIMARY KEY AUTOINCREMENT,
     Latitude REAL,
     Longitude REAL,
+    Elevation REAL,
+    Country TEXT,
     CircuitVersion TEXT,
     FirstGrandPrix TEXT,
     LastGrandPrix TEXT,
@@ -128,6 +130,7 @@ cursor.execute('''CREATE TABLE GrandsPrix (
     GrandPrixName TEXT,
     RoundNumber INTEGER,
     CircuitName TEXT,
+    Country TEXT,
     Date TEXT,
     DateInDateTime TEXT,
     Laps INTEGER,
@@ -255,6 +258,7 @@ cursor.execute('''CREATE TABLE Constructors (
     DNFs INTEGER DEFAULT 0,
     GrandPrixLapsLed INTEGER DEFAULT 0,
     SprintLapsLed INTEGER DEFAULT 0,
+    OneTwos INTEGER DEFAULT 0,
     BestGridPosition INTEGER,
     BestSprintGridPosition INTEGER,
     BestQualifyingPosition INTEGER,
@@ -264,6 +268,9 @@ cursor.execute('''CREATE TABLE Constructors (
     BestChampionshipPosition INTEGER,
     FirstGrandPrix TEXT,
     LastGrandPrix TEXT,
+    Nationalities TEXT,
+    Filiation TEXT,
+    TeamPrincipals TEXT,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
     needstatsupdate BOOLEAN DEFAULT 1,
@@ -349,6 +356,10 @@ cursor.execute('''CREATE TABLE Chassis (
     ID INTEGER PRIMARY KEY AUTOINCREMENT,
     ConstructorName TEXT,
     ChassisName TEXT UNIQUE,
+    EngineMakesUsed TEXT,
+    TyresUsed TEXT,
+    Designers TEXT,
+    EngineModelsUsed TEXT,
     Wins INTEGER DEFAULT 0,
     Podiums INTEGER DEFAULT 0,
     Poles INTEGER DEFAULT 0,
@@ -798,6 +809,17 @@ cursor.execute('''CREATE TABLE WeatherData (
     FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
 )''')
 
+cursor.execute('''CREATE TABLE FamilyRelations (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    Driver TEXT,
+    RelatedDriver TEXT,
+    RelationType TEXT,
+    DriverID INTEGER,
+    RelatedDriverID INTEGER,
+    FOREIGN KEY (DriverID) REFERENCES Drivers(ID),
+    FOREIGN KEY (RelatedDriverID) REFERENCES Drivers(ID),
+    UNIQUE (DriverID, RelatedDriverID)
+)''')
 
 conn.commit()
 conn.close()

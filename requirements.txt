@@ -4,3 +4,4 @@ numpy
 fastf1
 timezonefinder
 deep_translator
+curl_cffi

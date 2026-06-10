@@ -1,6 +1,7 @@
 from os import link
 import sqlite3
 import urllib.request, urllib.parse, urllib.error
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 import time
 import re
@@ -17,8 +18,8 @@ import warnings
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 import fastf1
-from deep_translator import GoogleTranslator
-
+from deep_translator import DeeplTranslator, GoogleTranslator
+import random # for random pauses to avoid hitting rate limits
 
 # Suppress technical warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -28,17 +29,51 @@ cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
 
 timezone_finder = TimezoneFinder()
+elevation_cache = {}
+country_cache = {}
+constructors_processed_cache = set()
+
+def parse_coordinate(value):
+    match = re.search(r'-?\d+(?:\.\d+)?', str(value).strip())
+    if not match:
+        raise ValueError(f"Invalid coordinate: {value}")
+    return float(match.group(0))
+
 
 def get_timezone_from_coords(lat, lng):
     if lat is None or lng is None:
         return None
+    lat = parse_coordinate(lat)
+    lng = parse_coordinate(lng)
     try:
-        return timezone_finder.timezone_at(lng=float(lng), lat=float(lat))
+        return timezone_finder.timezone_at(lng=lng, lat=lat)
     except Exception:
         try:
-            return timezone_finder.closest_timezone_at(lng=float(lng), lat=float(lat))
+            return timezone_finder.closest_timezone_at(lng=lng, lat=lat)
         except Exception:
             return None
+
+
+def get_elevation_from_coords(lat, lng):
+    key = (parse_coordinate(lat), parse_coordinate(lng))
+    if key not in elevation_cache:
+        url = f"https://api.open-meteo.com/v1/elevation?latitude={key[0]}&longitude={key[1]}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        elevation_cache[key] = data["elevation"][0]
+    return elevation_cache[key]
+
+
+def get_country_from_coords(lat, lng):
+    key = (parse_coordinate(lat), parse_coordinate(lng))
+    if key not in country_cache:
+        url = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={key[0]}&longitude={key[1]}&localityLanguage=en"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        country_cache[key] = data["countryName"]
+    return country_cache[key]
 
 
 def build_local_datetime(timestamp_seconds, timezone_name):
@@ -99,24 +134,260 @@ def canonicalize_session_name(session_name, year=None):
     return canonical + cancelled_suffix
 
 
+def slugify_statsf1_constructor_name(name):
+    if "?" in name:
+        name = name.replace("?", "-")
+    name = name.replace("°", "-")
+    return re.sub(r"[^a-z0-9.]", "-", normalize_name(name)).replace("/", "-").replace("(", "-").replace(")", "-")
+
+def parse_designers(html):
+    soup = BeautifulSoup(html, "html.parser")
+    designers = []
+    strong = soup.select_one("fieldset.modeldes .field strong")
+    if not strong:
+        return []
+
+    # Preserve <br> as line breaks
+    text = strong.get_text("\n", strip=True)
+
+    # Split on newlines and slashes
+    parts = []
+    for line in text.split("\n"):
+        parts.extend(
+            p.strip()
+            for p in re.split(r"\s*/\s*", line)
+            if p.strip()
+        )
+
+    for part in parts:
+        # Match: Name (Role)
+        m = re.match(r"^(.*?)\s*\((.*?)\)\s*$", part)
+
+        if m:
+            name, role = m.groups()
+
+            designers.append({
+                "name": translate_reason(name.strip()),
+                "role": translate_reason(role.strip())
+            })
+        else:
+            designers.append({
+                "name": translate_reason(part),
+                "role": None
+            })
+
+    return designers
+
+def parse_constructor_nationalities_from_page(page_soup):
+    page_text = page_soup.get_text("\n", strip=True)
+    match = re.search(r"Nation\s*:\s*([^\n]+)", page_text)
+    if not match:
+        return []
+
+    nationalities = []
+    for item in match.group(1).split(","):
+        item = item.strip()
+        if not item:
+            continue
+
+        nationality_match = re.match(r"^(.*?)\s*\((\d{4})\)$", item)
+        if nationality_match:
+            nationalities.append([nationality_match.group(1).strip(), int(nationality_match.group(2))])
+        else:
+            nationalities.append([item, None])
+
+    return nationalities
+
+
+def parse_constructor_lineage_section(page_soup, heading):
+    heading_text = page_soup.find(string=lambda s: s and heading in s)
+    if not heading_text:
+        return []
+
+    container = heading_text.find_parent("div", class_="biobot") or heading_text.parent
+    lines = [line.strip() for line in container.get_text("\n", strip=True).splitlines() if line.strip()]
+
+    try:
+        start_index = next(index for index, line in enumerate(lines) if heading in line)
+    except StopIteration:
+        return []
+
+    section_lines = []
+    for line in lines[start_index + 1:]:
+        if line == "* * *":
+            break
+        if re.match(r"^(Filiation|Team Principal)\s*:", line) and heading not in line:
+            break
+        section_lines.append(line)
+
+    section_text = " ".join(section_lines).replace("•", "").strip()
+    if not section_text:
+        return []
+
+    chains = [chain.strip() for chain in re.split(r"\s*\u279c\s*", section_text) if chain.strip()]
+
+    parsed = []
+    entries = []
+    for segment in chains:
+        segment = segment.lstrip("•").strip()
+        match = re.match(r"^(.*?)\s*\((.*?)\)\s*$", segment)
+        if not match:
+            continue
+        name = match.group(1).strip()
+        era = match.group(2).strip()
+        entries.append({name: era})
+
+    if entries:
+        parsed.append(entries)
+
+    return parsed
+
+
+def parse_constructor_lineage_section_v2(page_soup, heading):
+    heading_text = page_soup.find(string=lambda s: s and heading in s)
+    if not heading_text:
+        return []
+
+    parsed = []
+    chain = []
+    current_name = None
+
+    for child in heading_text.next_siblings:
+        if getattr(child, "name", None) == "hr":
+            break
+
+        if isinstance(child, str):
+            text = child.replace("\n", " ").strip()
+            if not text:
+                continue
+
+            if "•" in text:
+                if chain:
+                    parsed.append(chain)
+                    chain = []
+                current_name = None
+                text = text.replace("•", "").strip()
+
+            text = text.replace("➜", "").strip()
+            if text:
+                current_name = text
+            continue
+
+        if child.name in {"a", "strong"}:
+            current_name = child.get_text(" ", strip=True)
+            continue
+
+        if child.name == "span":
+            if current_name is None:
+                continue
+
+            eras = re.findall(r"\(([^()]*)\)", child.get_text(" ", strip=True))
+            for era in eras:
+                chain.append({current_name: era.strip()})
+
+    if chain:
+        parsed.append(chain)
+
+    return parsed
+
+
+def parse_constructor_lineage_section(page_soup, heading):
+    heading_text = page_soup.find(string=lambda s: s and heading in s)
+    if not heading_text:
+        return []
+
+    parsed = []
+    chain = []
+    current_name = None
+
+    for child in heading_text.next_siblings:
+        if getattr(child, "name", None) == "hr":
+            break
+
+        if isinstance(child, str):
+            text = child.replace("\n", " ").strip()
+            if not text:
+                continue
+
+            if "•" in text:
+                if chain:
+                    parsed.append(chain)
+                    chain = []
+                current_name = None
+                text = text.replace("•", "").strip()
+
+            text = text.replace("➜", "").strip()
+            if text:
+                current_name = text
+            continue
+
+        if child.name in {"a", "strong"}:
+            current_name = child.get_text(" ", strip=True)
+            continue
+
+        if child.name == "span":
+            if current_name is None:
+                continue
+
+            eras = re.findall(r"\(([^()]*)\)", child.get_text(" ", strip=True))
+            for era in eras:
+                chain.append({current_name: era.strip()})
+
+    if chain:
+        parsed.append(chain)
+
+    return parsed
+
+
 #Functions:
-headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'} #Mimics the browser user agent to avoid being blocked by the website
-#This is the open_url function that opens the url and returns the soup object
+headers = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
 def open_url(url, retries=3):
     url = "https://" + url.replace("https://", "").replace("//", "/")
-    req = urllib.request.Request(url, headers=headers)
+    last_exception = None
+
     for attempt in range(retries):
         try:
-            html = urllib.request.urlopen(req, timeout=30).read()
+            response = requests.get(
+                url,
+                headers=headers,
+                impersonate="chrome",
+                timeout=30
+            )
+            if (
+                response.status_code == 302
+                and response.headers.get("location")
+                == "https://www.statsf1.com/errors/GenericErrorPage.htm"
+            ):
+                raise Exception(
+                    "You have been IP blocked by statsf1.com. Please wait and try again later."
+                )
+            response.raise_for_status()
+            if "statsf1.com" in url:
+                time.sleep(random.uniform(4, 15))
             global soup
-            soup = BeautifulSoup(html, 'html.parser')
+            soup = BeautifulSoup(response.content, "html.parser")
             return soup
-        except (Exception) as e:
-        #except (urllib.error.URLError, socket.timeout, TimeoutError, Exception) as e:
+        except Exception as e:
+            last_exception = e
             print(f"Attempt {attempt + 1} failed for URL {url}: {e}")
-            time.sleep(5)  # Wait 5 seconds before retrying
-    raise RuntimeError(f"Failed to open URL {url} after {retries} attempts.")
+
+            if attempt < retries - 1:
+                time.sleep(
+                    random.expovariate(1 / (5 * (2 ** attempt)))
+                )
+    if isinstance(last_exception, (requests.exceptions.Timeout, TimeoutError)):
+        print("Timed out after all retries. Sleeping for 5 minutes...")
+        time.sleep(300)
+    raise RuntimeError(
+        f"Failed to open URL {url} after {retries} attempts."
+    ) from last_exception
 
 #This is the function we use to open json files. We use this when we scrape APIs
 def open_json(url):
@@ -806,11 +1077,7 @@ def translate_reason(text):
         return None
     # Try DeepL / Deepl first (import dynamically), fall back to Google
     try:
-        try:
-            from deep_translator import DeeplTranslator as DeepLTranslator
-        except Exception:
-            from deep_translator import DeepLTranslator as DeepLTranslator
-        translated = DeepLTranslator(source='auto', target='en').translate(text)
+        translated = DeeplTranslator(source='auto', target='en').translate(text)
         if translated:
             return translated
     except Exception:
@@ -906,6 +1173,42 @@ def update_deaths_db(cursor, conn):
                                (date, age, reason_translated, driver_id))
                 conn.commit()
                 print(f"Updated death info for: {db_name} ({date})")
+
+
+def fetch_family_relations_from_statsf1():
+    """Fetch family relationships data from sampledata.html"""
+    open_url("https://www.statsf1.com/en/statistiques/pilote/divers/famille.aspx")
+
+    table = soup.find("table", {"class": "sortable"})
+
+    if not table:
+        print("Warning: Could not find the family relationships")
+        return []
+
+    rows = table.find_all("tr")[1:]  # Skip header
+    global family_pairs
+    family_pairs = []
+
+    for row in rows:
+        tds = row.find_all("td")
+        if len(tds) >= 3:
+            # Extract driver names from links
+            first_driver_link = tds[0].find("a")
+            second_driver_link = tds[1].find("a")
+            relation_type = tds[2].get_text(strip=True).replace("&amp;", "&")
+
+            if first_driver_link and second_driver_link:
+                first_driver = first_driver_link.get_text(strip=True)
+                second_driver = second_driver_link.get_text(strip=True)
+                family_pairs.append({
+                    'driver1': first_driver,
+                    'driver2': second_driver,
+                    'relation_type': relation_type
+                })
+
+    return family_pairs
+
+
 
 #This function parses the points system from the statsf1.com seasons page.
 def parse_points_system(html_content):
@@ -1725,7 +2028,89 @@ def is_female_driver(name):
         return False
 
 
+def check_and_add_family_relations(driver_name, driver_id, cursor, family_pairs):
+    """
+    Check if a newly added driver is related to any drivers in the fetched family relations data.
+    If a relation exists, add it bidirectionally to the FamilyRelations table.
+    """
+    # Normalize the new driver name for comparison
+    new_driver_norm = normalize_name(driver_name)
+    
+    # Relationship type mapping
+    relation_mapping = {
+        "Father & Son": ("Father", "Son"),
+        "Brothers": ("Brother", "Brother"),
+        "Brother & Sister": ("Brother", "Sister"),
+        "Half-Brother": ("Half-Brother", "Half-Brother"),
+        "Grandfather & Grandson": ("Grandfather", "Grandson"),
+        "Uncle & Nephew": ("Uncle", "Nephew"),
+        "Great Uncle & Little Nephew": ("Great Uncle", "Grand Nephew"),
+    }
+    
+    # Check if this driver appears in any family relationships
+    for pair in family_pairs:
+        driver1_html = pair['driver1']
+        driver2_html = pair['driver2']
+        relation_type = pair['relation_type']
+        
+        # Format names
+        driver1_formatted = format_name_from_caps(driver1_html)
+        driver2_formatted = format_name_from_caps(driver2_html)
+        
+        # Normalize for comparison
+        driver1_norm = normalize_name(driver1_formatted)
+        driver2_norm = normalize_name(driver2_formatted)
+        
+        if relation_type not in relation_mapping:
+            continue
+        
+        rel1, rel2 = relation_mapping[relation_type]
+        
+        # Check if new driver matches driver1
+        if new_driver_norm == driver1_norm:
+            # Find driver2 in database
+            cursor.execute("SELECT ID FROM Drivers WHERE LOWER(Name) = ?", (driver2_formatted.lower(),))
+            result = cursor.fetchone()
+            if result:
+                related_driver_id = result[0]
+                try:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO FamilyRelations (Driver, RelatedDriver, RelationType, DriverID, RelatedDriverID) VALUES (?, ?, ?, ?, ?)",
+                        (driver_name, driver2_formatted, rel1, driver_id, related_driver_id)
+                    )
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO FamilyRelations (Driver, RelatedDriver, RelationType, DriverID, RelatedDriverID) VALUES (?, ?, ?, ?, ?)",
+                        (driver2_formatted, driver_name, rel2, related_driver_id, driver_id)
+                    )
+                    print(f"  Family relation added: {driver_name} ({rel1}) <-> {driver2_formatted} ({rel2})")
+                except Exception as e:
+                    print(f"  Warning: Could not add family relation for {driver_name}: {e}")
+        
+        # Check if new driver matches driver2
+        elif new_driver_norm == driver2_norm:
+            # Find driver1 in database
+            cursor.execute("SELECT ID FROM Drivers WHERE LOWER(Name) = ?", (driver1_formatted.lower(),))
+            result = cursor.fetchone()
+            if result:
+                related_driver_id = result[0]
+                try:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO FamilyRelations (Driver, RelatedDriver, RelationType, DriverID, RelatedDriverID) VALUES (?, ?, ?, ?, ?)",
+                        (driver_name, driver1_formatted, rel2, driver_id, related_driver_id)
+                    )
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO FamilyRelations (Driver, RelatedDriver, RelationType, DriverID, RelatedDriverID) VALUES (?, ?, ?, ?, ?)",
+                        (driver1_formatted, driver_name, rel1, related_driver_id, driver_id)
+                    )
+                    print(f"  Family relation added: {driver_name} ({rel2}) <-> {driver1_formatted} ({rel1})")
+                except Exception as e:
+                    print(f"  Warning: Could not add family relation for {driver_name}: {e}")
+
+
+
+
 update_deaths_db(cur, conn)
+
 
 
 def parse_race_info(html_content, someelements):
@@ -4466,6 +4851,10 @@ if cur.fetchone()[0] == 0:
             a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
             coord_str = re.search(r'@([^,]+),([^,]+)', a_tag).groups()
             lat, lng = coord_str
+            lat = parse_coordinate(lat)
+            lng = parse_coordinate(lng)
+            country = get_country_from_coords(lat, lng)
+            elevation = get_elevation_from_coords(lat, lng)
             circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
             for layoutdiv in circuitlayoutdivs:
                 circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
@@ -4475,7 +4864,7 @@ if cur.fetchone()[0] == 0:
                 circuit_text_div = layoutdiv.find('div', class_='circuitversiontxt')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')            
                 t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?)", (lat, lng, json.dumps(dates), version, t, circuit_text))
+                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                 circuitlayoutid = cur.fetchone()[0]
 else:
@@ -4654,13 +5043,22 @@ for season in seasons[index:]:
         if race_info['track_name'] in mappings.keys():
             race_info['latitude'], race_info['longitude'] = mappings[race_info['track_name']]
             race_info['timezone'] = get_timezone_from_coords(race_info['latitude'], race_info['longitude'])
+            race_info['country'] = get_country_from_coords(race_info['latitude'], race_info['longitude'])
             #If this is being updated, not reset, and this start off from the last grand prix, then we check if there are new circuit layouts for the circuit since the last grand prix, and if there are, we add them to the database.
-            if race_info['race_number'] > last_grandprix_id > 1150: 
+            if race_info['race_number'] > last_grandprix_id > 1163: 
                 #temporary solution. 1149 is the 2025 Abu Dhabi Grand Prix, which is the last grand prix in the database currently, 
                 #so if the last grand prix id is greater than 1149, it means we are updating and not resetting, 
                 # and we can check for new circuit layouts since the last grand prix.
+                #this has been updated to 1163, so before the Madrid race.
+                #TODO: find a solution to this.
                 open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")  
                 lat, lng = mappings[race_info['track_name']]
+                lat = parse_coordinate(lat)
+                lng = parse_coordinate(lng)
+                mappings[race_info['track_name']] = (lat, lng)
+                race_info['latitude'], race_info['longitude'] = lat, lng
+                race_info['country'] = country
+                elevation = get_elevation_from_coords(lat, lng)
                 circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
                 cur.execute ("SELECT CircuitVersion FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ?", (race_info['latitude'], race_info['longitude']))
                 existing_versions = cur.fetchall()
@@ -4675,7 +5073,7 @@ for season in seasons[index:]:
                         t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
                         circuit_text_div = soup.find('div', class_='circuittext')
                         circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?)", (lat, lng, json.dumps(dates), version, t, circuit_text))
+                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
                         cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                         circuitlayoutid = cur.fetchone()[0]
                     else:
@@ -4686,9 +5084,13 @@ for season in seasons[index:]:
             coord_str = a_tag[a_tag.index('@') + 1 : a_tag.rindex(',')]
             lat = coord_str[:coord_str.index(',')]
             lng = coord_str[coord_str.index(',') + 1:]  
+            lat = parse_coordinate(lat)
+            lng = parse_coordinate(lng)
             mappings[race_info['track_name']] = (lat, lng)
             race_info['latitude'], race_info['longitude'] = lat, lng
             race_info['timezone'] = get_timezone_from_coords(lat, lng)
+            country = get_country_from_coords(lat, lng)
+            elevation = get_elevation_from_coords(lat, lng)
             print(f"Processing circuit: {race_info['track_name']}")
             circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
             for layoutdiv in circuitlayoutdivs:
@@ -4699,7 +5101,7 @@ for season in seasons[index:]:
                 t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
                 circuit_text_div = soup.find('div', class_='circuittext')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?)", (lat, lng, json.dumps(dates), version, t, circuit_text))
+                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version))   
                 circuitlayoutid = cur.fetchone()[0]      
         #print(race_info)
@@ -4725,10 +5127,10 @@ for season in seasons[index:]:
         cur.execute("SELECT ID FROM Circuits WHERE CircuitName = ?", (race_info['circuit_name'],))
         circuitid = cur.fetchone()[0]
         corresponding_circuit_layout = link_circuitlayout(race_info['latitude'], race_info['longitude'], race_info['dateindatetime'])
-        cur.execute("""INSERT INTO GrandsPrix (ID, Season, GrandPrixName, RoundNumber, CircuitName, Date, DateInDateTime, Laps, CircuitLength, Weather, Notes, SprintWeekend, PoleSide, GridFormation, CircuitID, CircuitLayoutID)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        cur.execute("""INSERT INTO GrandsPrix (ID, Season, GrandPrixName, RoundNumber, CircuitName, Country, Date, DateInDateTime, Laps, CircuitLength, Weather, Notes, SprintWeekend, PoleSide, GridFormation, CircuitID, CircuitLayoutID)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, 
-        (race_info['race_number'], year, gp, grandsprix.index(grandprix) + 1, race_info['circuit_name'], race_info['date'], race_info['dateindatetime'], race_info['laps'], race_info['circuit_distance'], race_info['weather'], race_info.get('notes'), trigger, poleside, gridformation, circuitid, corresponding_circuit_layout))   
+        (race_info['race_number'], year, gp, grandsprix.index(grandprix) + 1, race_info['circuit_name'], race_info['country'], race_info['date'], race_info['dateindatetime'], race_info['laps'], race_info['circuit_distance'], race_info['weather'], race_info.get('notes'), trigger, poleside, gridformation, circuitid, corresponding_circuit_layout))   
         cur.execute("UPDATE Seasons SET needstatsupdate = 1 WHERE Season = ?", (year,))
         cur.execute('UPDATE Circuits SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE CircuitName = ?', (gp, race_info['race_number'], race_info['circuit_name']))
         #add one to grandprixcount in circuits table
@@ -4879,13 +5281,94 @@ for season in seasons[index:]:
             cur.execute("SELECT ID FROM GrandsPrix WHERE GrandPrixName = ?", (gp,))
             grandprix_id = cur.fetchone()[0]            
             cur.execute("INSERT OR IGNORE INTO Teams (TeamName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (result['team'], gp, grandprix_id))
-            cur.execute("INSERT OR IGNORE INTO Constructors (ConstructorName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (result['constructor'], gp, grandprix_id))
+            constructor_name = result['constructor']
+            if constructor_name not in constructors_processed_cache:
+                constructor_slug = slugify_statsf1_constructor_name(constructor_name)
+                open_url(f"https://www.statsf1.com/en/{constructor_slug}.aspx")
+                constructor_nationalities = parse_constructor_nationalities_from_page(soup)
+                filiations = []
+                team_principals = []
+
+                # ---------- Filiation ----------
+                filiation_text = soup.find(string=lambda s: s and "Filiation" in s)
+
+                if filiation_text:
+                    section = []
+
+                    for node in filiation_text.parent.next_siblings:
+                        if getattr(node, "name", None) == "hr":
+                            break
+
+                        section.append(str(node))
+
+                    html = "".join(section)
+                    chains = [c.strip() for c in html.split("•") if c.strip()]
+
+                    for chain in chains:
+                        chain_soup = BeautifulSoup(chain, "html.parser")
+
+                        lineage = []
+
+                        for tag in chain_soup.find_all(["strong", "a"]):
+                            era_tag = tag.find_next("span")
+
+                            if era_tag:
+                                era = re.search(r"\((.*?)\)", era_tag.get_text()).group(1)
+                                lineage.append({tag.get_text(strip=True): era})
+
+                        filiations.append(lineage)
+
+                # ---------- Team Principal ----------
+                principal_text = soup.find(string=lambda s: s and "Team Principal" in s)
+
+                if principal_text:
+                    section = []
+
+                    for node in principal_text.parent.next_siblings:
+                        if getattr(node, "name", None) == "hr":
+                            break
+
+                        section.append(str(node))
+
+                    html = "".join(section)
+                    chains = [c.strip() for c in html.split("•") if c.strip()]
+
+                    for chain in chains:
+                        chain_soup = BeautifulSoup(chain, "html.parser")
+
+                        principals = []
+
+                        for span in chain_soup.find_all("span"):
+                            m = re.search(r"\((.*?)\)", span.get_text())
+                            if not m:
+                                continue
+
+                            name = span.previous_sibling.strip()
+                            principals.append({name: m.group(1)})
+                        team_principals.append(principals)                                
+                cur.execute("INSERT OR IGNORE INTO Constructors (ConstructorName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (constructor_name, gp, grandprix_id))
+                cur.execute("SELECT ID FROM Constructors WHERE ConstructorName = ?", (constructor_name,))
+                constructor_id = cur.fetchone()[0]
+                cur.execute("""
+                    UPDATE Constructors SET
+                        Nationalities = ?,
+                        Filiation = CASE WHEN ? != '[]' THEN ? ELSE Filiation END,
+                        TeamPrincipals = CASE WHEN ? != '[]' THEN ? ELSE TeamPrincipals END
+                    WHERE ID = ?
+                """, (
+                    json.dumps(constructor_nationalities),
+                    json.dumps(filiations), json.dumps(filiations),
+                    json.dumps(team_principals), json.dumps(team_principals),
+                    constructor_id
+                ))
+                constructors_processed_cache.add(constructor_name)
             cur.execute("INSERT OR IGNORE INTO Engines (EngineName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (result['engine'], gp, grandprix_id))
             cur.execute("INSERT OR IGNORE INTO Tyres (TyreName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (result['tyre'], gp, grandprix_id))
             cur.execute("SELECT 1 FROM drivers WHERE name = ?", (result['driver'],))
             exists = cur.fetchone()
             nationality_id = None
             if not exists:
+                fetch_family_relations_from_statsf1()
                 # If not in DB, scrape or fetch their nationality and birthdate
                 #change gianmaria bruni back to gimmi bruni:
                 name_corrections = {
@@ -4906,14 +5389,6 @@ for season in seasons[index:]:
                 cur.execute("INSERT OR IGNORE INTO Nationalities (Nationality, FirstGrandPrix, FirstGrandPrixID) VALUES (?, ?, ?)", (nationality, first_grandprix, first_grandprix_id))
                 cur.execute("SELECT ID FROM Nationalities WHERE Nationality = ?", (nationality,))
                 nationality_id = cur.fetchone()[0]                     
-                # Ensure Gender column exists, then insert into drivers table
-                cur.execute("PRAGMA table_info(Drivers)")
-                _cols = [r[1] for r in cur.fetchall()]
-                if 'Gender' not in _cols:
-                    try:
-                        cur.execute("ALTER TABLE Drivers ADD COLUMN Gender TEXT")
-                    except Exception:
-                        pass
                 gender = None
                 try:
                     gender = 'female' if is_female_driver(result['driver']) else 'male'
@@ -4925,13 +5400,17 @@ for season in seasons[index:]:
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (result['driver'], nationality, birthdate, first_grandprix, first_grandprix_id, nationality_id, gender))          
                 cur.execute('UPDATE Nationalities SET DriverCount = DriverCount + 1 WHERE ID = ?', (nationality_id,))
+                # Check and add family relationships for the newly added driver
+                cur.execute("SELECT ID FROM Drivers WHERE Name = ?", (result['driver'],))
+                new_driver_id = cur.fetchone()[0]
+                check_and_add_family_relations(result['driver'], new_driver_id, cur, family_pairs)
             else:
                 driver_firstgrandprix = cur.execute("SELECT FirstGrandPrix FROM Drivers WHERE Name = ?", (result['driver'],)).fetchone()[0]
                 if driver_firstgrandprix is None and not result["substituteorthirddriver"]:
                     cur.execute("UPDATE Drivers SET FirstGrandPrix = ?, FirstGrandPrixID = ? WHERE Name = ?", (gp, grandprix_id, result['driver']))
                 nationality_firstgrandprix = cur.execute("SELECT FirstGrandPrix FROM Nationalities WHERE ID = (SELECT NationalityID FROM Drivers WHERE Name = ?)", (result['driver'],)).fetchone()[0]
                 if nationality_firstgrandprix is None and not result["substituteorthirddriver"]:
-                    cur.execute("UPDATE Nationalities SET FirstGrandPrix = ?, FirstGrandPrixID = ? WHERE ID = (SELECT NationalityID FROM Drivers WHERE Name = ?)", (gp, grandprix_id, result['driver']))
+                    cur.execute("UPDATE Nationalities SET FirstGrandPrix = ?, FirstGrandPrixID = ? WHERE ID = (SELECT NationalityID FROM Drivers WHERE Namechassis_name = ?)", (gp, grandprix_id, result['driver']))
             cur.execute("SELECT ID FROM Drivers WHERE Name = ?", (result['driver'],))
             driver_id = cur.fetchone()[0]
             #print (result['driver'], driver_id)
@@ -4940,6 +5419,30 @@ for season in seasons[index:]:
             cur.execute("SELECT ID FROM Constructors WHERE ConstructorName = ?", (result['constructor'],))
             constructor_id = cur.fetchone()[0]
             cur.execute("INSERT OR IGNORE INTO Chassis (ConstructorName, ChassisName, ConstructorID, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?,?,?)", (result['constructor'], result['chassis'], constructor_id, gp, grandprix_id))          
+            if cur.rowcount > 0:
+                open_url(f"https://www.statsf1.com/en/{slugify_statsf1_constructor_name(result['constructor'])}-{slugify_statsf1_constructor_name(result['chassis'])}.aspx")
+                engines_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}) else None
+                tyres_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}) else None
+                designers = parse_designers(str(soup))
+                cur.execute("""
+                    SELECT DISTINCT EngineModel
+                    FROM GrandPrixResults
+                    WHERE Constructor = ? AND Chassis = ?
+                """, (result['constructor'], result['chassis']))
+
+                engine_models = [row[0] for row in cur.fetchall()]
+                cur.execute("""
+                    UPDATE Chassis
+                    SET EngineMakesUsed = ?, TyresUsed = ?, Designers = ?, EngineModelsUsed = ?
+                    WHERE ConstructorName = ? AND ChassisName = ?
+                """, (
+                    json.dumps(engines_used) if engines_used else None,
+                    json.dumps(tyres_used) if tyres_used else None,
+                    json.dumps(designers) if designers else None,
+                    json.dumps(engine_models) if engine_models else None,
+                    result['constructor'],
+                    result['chassis']
+                ))                
             cur.execute("SELECT ID FROM Chassis WHERE ChassisName = ?", (result['chassis'],))
             chassis_id = cur.fetchone()[0]
             cur.execute("SELECT ID FROM Engines WHERE EngineName = ?", (result['engine'],))
@@ -5655,34 +6158,222 @@ cur.execute("UPDATE Drivers SET indy500only = CASE WHEN (SELECT COUNT(*) FROM Gr
 
 print("Drivers stats updated.")
 
-# Update Seasons stats
-cur.execute("UPDATE Seasons SET TotalGrandPrix = (SELECT COUNT(*) FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalDrivers = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalConstructors = (SELECT COUNT(DISTINCT constructorid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalEngines = (SELECT COUNT(DISTINCT engineid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalTeams = (SELECT COUNT(DISTINCT teamid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalEngineModels = (SELECT COUNT(DISTINCT enginemodelid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalChassis = (SELECT COUNT(DISTINCT chassisid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalNationalities = (SELECT COUNT(DISTINCT nationalityid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueWinners = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND raceposition = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniquePodiumFinishers = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND raceposition <= 3) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniquePolePositions = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND qualifyingposition = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueFastestLapGetters = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND fastestlap = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalDriversWithPoints = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND (racepoints > 0 OR sprintpoints > 0)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimePointsScorers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND (gr.racepoints > 0 OR gr.sprintpoints > 0) AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND (racepoints > 0 OR sprintpoints > 0))) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeWinners = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.raceposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND raceposition = 1)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimePodiumFinishers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.raceposition <= 3 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND raceposition <= 3)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimePoleSitters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.qualifyingposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND qualifyingposition = 1)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeFastestLapGetters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.fastestlap = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND fastestlap = 1)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueSprintWinners = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintposition = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueSprintPodiumFinishers = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintposition <= 3) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueSprintPolePositions = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprint_qualifyingposition = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalUniqueSprintFastestLapGetters = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintfastestlap = 1) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalDriversWithSprintPoints = (SELECT COUNT(DISTINCT driverid) FROM GrandPrixResults WHERE GrandPrixResults.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND sprintpoints > 0) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeSprintWinners = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintposition = 1)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeSprintPodiumFinishers = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintposition <= 3 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintposition <= 3)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeSprintPoleSitters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprint_qualifyingposition = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprint_qualifyingposition = 1)) WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET TotalFirstTimeSprintFastestLapGetters = (SELECT COUNT(DISTINCT gr.driverid) FROM GrandPrixResults gr WHERE gr.grandprixid IN (SELECT ID FROM GrandsPrix WHERE GrandsPrix.Season = Seasons.Season) AND gr.sprintfastestlap = 1 AND gr.driverid NOT IN (SELECT DISTINCT driverid FROM GrandPrixResults WHERE grandprixid IN (SELECT ID FROM GrandsPrix WHERE Season < Seasons.Season) AND sprintfastestlap = 1)) WHERE needstatsupdate = 1")
+# Update Seasons stats using a single data pass for all seasons needing refresh.
+cur.execute("SELECT Season FROM Seasons WHERE needstatsupdate = 1 ORDER BY Season")
+seasons_to_update = [row[0] for row in cur.fetchall()]
+if seasons_to_update:
+    max_season = max(seasons_to_update)
+
+    cur.execute("SELECT Season, COUNT(*) FROM GrandsPrix WHERE Season <= ? GROUP BY Season", (max_season,))
+    grand_prix_counts = {row[0]: row[1] for row in cur.fetchall()}
+
+    # Build per-season aggregates from GrandPrixResults once.
+    cur.execute("""
+        SELECT gp.Season,
+               gr.driverid,
+               gr.constructorid,
+               gr.engineid,
+               gr.teamid,
+               gr.enginemodelid,
+               gr.chassisid,
+               gr.nationalityid,
+               gr.raceposition,
+               gr.qualifyingposition,
+               gr.fastestlap,
+               gr.racepoints,
+               gr.sprintpoints,
+               gr.sprintposition,
+               gr.sprint_qualifyingposition,
+               gr.sprintfastestlap
+        FROM GrandPrixResults gr
+        JOIN GrandsPrix gp ON gr.grandprixid = gp.ID
+        WHERE gp.Season <= ?
+    """, (max_season,))
+
+    season_stats = {}
+    def add_if_not_none(target_set, value):
+        if value is not None:
+            target_set.add(value)
+
+    for (season, driverid, constructorid, engineid, teamid, enginemodelid,
+         chassisid, nationalityid, raceposition, qualifyingposition, fastestlap,
+         racepoints, sprintpoints, sprintposition, sprint_qualifyingposition,
+         sprintfastestlap) in cur.fetchall():
+        stats = season_stats.setdefault(season, {
+            'drivers': set(),
+            'constructors': set(),
+            'engines': set(),
+            'teams': set(),
+            'enginemodels': set(),
+            'chassis': set(),
+            'nationalities': set(),
+            'unique_winners': set(),
+            'unique_podiums': set(),
+            'unique_poles': set(),
+            'unique_fastest': set(),
+            'points_scorers': set(),
+            'unique_sprint_winners': set(),
+            'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(),
+            'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        add_if_not_none(stats['drivers'], driverid)
+        add_if_not_none(stats['constructors'], constructorid)
+        add_if_not_none(stats['engines'], engineid)
+        add_if_not_none(stats['teams'], teamid)
+        add_if_not_none(stats['enginemodels'], enginemodelid)
+        add_if_not_none(stats['chassis'], chassisid)
+        add_if_not_none(stats['nationalities'], nationalityid)
+
+        if raceposition == 1:
+            add_if_not_none(stats['unique_winners'], driverid)
+        if raceposition is not None and raceposition <= 3:
+            add_if_not_none(stats['unique_podiums'], driverid)
+        if qualifyingposition == 1:
+            add_if_not_none(stats['unique_poles'], driverid)
+        if fastestlap == 1:
+            add_if_not_none(stats['unique_fastest'], driverid)
+        if (racepoints or 0) > 0 or (sprintpoints or 0) > 0:
+            add_if_not_none(stats['points_scorers'], driverid)
+        if sprintposition == 1:
+            add_if_not_none(stats['unique_sprint_winners'], driverid)
+        if sprintposition is not None and sprintposition <= 3:
+            add_if_not_none(stats['unique_sprint_podiums'], driverid)
+        if sprint_qualifyingposition == 1:
+            add_if_not_none(stats['unique_sprint_poles'], driverid)
+        if sprintfastestlap == 1:
+            add_if_not_none(stats['unique_sprint_fastest'], driverid)
+        if (sprintpoints or 0) > 0:
+            add_if_not_none(stats['sprint_points_scorers'], driverid)
+
+    prior_sets = {
+        'points_scorers': set(),
+        'winners': set(),
+        'podiums': set(),
+        'poles': set(),
+        'fastest': set(),
+        'sprint_winners': set(),
+        'sprint_podiums': set(),
+        'sprint_poles': set(),
+        'sprint_fastest': set(),
+        'sprint_points_scorers': set()
+    }
+
+    for season in sorted(seasons_to_update):
+        stats = season_stats.get(season, {
+            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
+            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
+            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
+            'unique_fastest': set(), 'points_scorers': set(),
+            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        total_grand_prix = grand_prix_counts.get(season, 0)
+        total_drivers = len(stats['drivers'])
+        total_constructors = len(stats['constructors'])
+        total_engines = len(stats['engines'])
+        total_teams = len(stats['teams'])
+        total_engine_models = len(stats['enginemodels'])
+        total_chassis = len(stats['chassis'])
+        total_nationalities = len(stats['nationalities'])
+        total_unique_winners = len(stats['unique_winners'])
+        total_unique_podiums = len(stats['unique_podiums'])
+        total_unique_poles = len(stats['unique_poles'])
+        total_unique_fastest = len(stats['unique_fastest'])
+        total_drivers_with_points = len(stats['points_scorers'])
+        total_first_time_points_scorers = len(stats['points_scorers'] - prior_sets['points_scorers'])
+        total_first_time_winners = len(stats['unique_winners'] - prior_sets['winners'])
+        total_first_time_podiums = len(stats['unique_podiums'] - prior_sets['podiums'])
+        total_first_time_poles = len(stats['unique_poles'] - prior_sets['poles'])
+        total_first_time_fastest = len(stats['unique_fastest'] - prior_sets['fastest'])
+        total_unique_sprint_winners = len(stats['unique_sprint_winners'])
+        total_unique_sprint_podiums = len(stats['unique_sprint_podiums'])
+        total_unique_sprint_poles = len(stats['unique_sprint_poles'])
+        total_unique_sprint_fastest = len(stats['unique_sprint_fastest'])
+        total_drivers_with_sprint_points = len(stats['sprint_points_scorers'])
+        total_first_time_sprint_winners = len(stats['unique_sprint_winners'] - prior_sets['sprint_winners'])
+        total_first_time_sprint_podiums = len(stats['unique_sprint_podiums'] - prior_sets['sprint_podiums'])
+        total_first_time_sprint_poles = len(stats['unique_sprint_poles'] - prior_sets['sprint_poles'])
+        total_first_time_sprint_fastest = len(stats['unique_sprint_fastest'] - prior_sets['sprint_fastest'])
+        total_first_time_sprint_points_scorers = len(stats['sprint_points_scorers'] - prior_sets['sprint_points_scorers'])
+
+        cur.execute("""
+            UPDATE Seasons SET
+                TotalGrandPrix = ?,
+                TotalDrivers = ?,
+                TotalConstructors = ?,
+                TotalEngines = ?,
+                TotalTeams = ?,
+                TotalEngineModels = ?,
+                TotalChassis = ?,
+                TotalNationalities = ?,
+                TotalUniqueWinners = ?,
+                TotalUniquePodiumFinishers = ?,
+                TotalUniquePolePositions = ?,
+                TotalUniqueFastestLapGetters = ?,
+                TotalDriversWithPoints = ?,
+                TotalFirstTimePointsScorers = ?,
+                TotalFirstTimeWinners = ?,
+                TotalFirstTimePodiumFinishers = ?,
+                TotalFirstTimePoleSitters = ?,
+                TotalFirstTimeFastestLapGetters = ?,
+                TotalUniqueSprintWinners = ?,
+                TotalUniqueSprintPodiumFinishers = ?,
+                TotalUniqueSprintPolePositions = ?,
+                TotalUniqueSprintFastestLapGetters = ?,
+                TotalDriversWithSprintPoints = ?,
+                TotalFirstTimeSprintWinners = ?,
+                TotalFirstTimeSprintPodiumFinishers = ?,
+                TotalFirstTimeSprintPoleSitters = ?,
+                TotalFirstTimeSprintFastestLapGetters = ?,
+                TotalFirstTimeSprintPointsScorers = ?
+            WHERE Season = ?
+        """, (
+            total_grand_prix,
+            total_drivers,
+            total_constructors,
+            total_engines,
+            total_teams,
+            total_engine_models,
+            total_chassis,
+            total_nationalities,
+            total_unique_winners,
+            total_unique_podiums,
+            total_unique_poles,
+            total_unique_fastest,
+            total_drivers_with_points,
+            total_first_time_points_scorers,
+            total_first_time_winners,
+            total_first_time_podiums,
+            total_first_time_poles,
+            total_first_time_fastest,
+            total_unique_sprint_winners,
+            total_unique_sprint_podiums,
+            total_unique_sprint_poles,
+            total_unique_sprint_fastest,
+            total_drivers_with_sprint_points,
+            total_first_time_sprint_winners,
+            total_first_time_sprint_podiums,
+            total_first_time_sprint_poles,
+            total_first_time_sprint_fastest,
+            total_first_time_sprint_points_scorers,
+            season
+        ))
+
+        prior_sets['points_scorers'].update(stats['points_scorers'])
+        prior_sets['winners'].update(stats['unique_winners'])
+        prior_sets['podiums'].update(stats['unique_podiums'])
+        prior_sets['poles'].update(stats['unique_poles'])
+        prior_sets['fastest'].update(stats['unique_fastest'])
+        prior_sets['sprint_winners'].update(stats['unique_sprint_winners'])
+        prior_sets['sprint_podiums'].update(stats['unique_sprint_podiums'])
+        prior_sets['sprint_poles'].update(stats['unique_sprint_poles'])
+        prior_sets['sprint_fastest'].update(stats['unique_sprint_fastest'])
+        prior_sets['sprint_points_scorers'].update(stats['sprint_points_scorers'])
 
 print("Seasons stats updated.")
 
@@ -5747,6 +6438,7 @@ cur.execute("UPDATE Constructors SET SprintWins = (SELECT COUNT(*) FROM GrandPri
 cur.execute("UPDATE Constructors SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintposition <= 3 AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintfastestlap = 1 AND Constructors.needstatsupdate = 1)")
+cur.execute("UPDATE Constructors SET OneTwos = (SELECT COUNT(*) FROM (SELECT grandprixid FROM GrandPrixResults g WHERE g.constructorid = Constructors.ID AND g.raceposition IN (1,2) GROUP BY grandprixid HAVING COUNT(DISTINCT g.raceposition) = 2)) WHERE Constructors.needstatsupdate = 1")
 cur.execute("UPDATE Constructors SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.constructorid = Constructors.ID AND ConstructorsChampionship.Position = 1 AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
 cur.execute("UPDATE Constructors SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
