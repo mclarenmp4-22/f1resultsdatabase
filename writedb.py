@@ -199,50 +199,6 @@ def parse_constructor_nationalities_from_page(page_soup):
     return nationalities
 
 
-def parse_constructor_lineage_section(page_soup, heading):
-    heading_text = page_soup.find(string=lambda s: s and heading in s)
-    if not heading_text:
-        return []
-
-    container = heading_text.find_parent("div", class_="biobot") or heading_text.parent
-    lines = [line.strip() for line in container.get_text("\n", strip=True).splitlines() if line.strip()]
-
-    try:
-        start_index = next(index for index, line in enumerate(lines) if heading in line)
-    except StopIteration:
-        return []
-
-    section_lines = []
-    for line in lines[start_index + 1:]:
-        if line == "* * *":
-            break
-        if re.match(r"^(Filiation|Team Principal)\s*:", line) and heading not in line:
-            break
-        section_lines.append(line)
-
-    section_text = " ".join(section_lines).replace("•", "").strip()
-    if not section_text:
-        return []
-
-    chains = [chain.strip() for chain in re.split(r"\s*\u279c\s*", section_text) if chain.strip()]
-
-    parsed = []
-    entries = []
-    for segment in chains:
-        segment = segment.lstrip("•").strip()
-        match = re.match(r"^(.*?)\s*\((.*?)\)\s*$", segment)
-        if not match:
-            continue
-        name = match.group(1).strip()
-        era = match.group(2).strip()
-        entries.append({name: era})
-
-    if entries:
-        parsed.append(entries)
-
-    return parsed
-
-
 def parse_constructor_lineage_section_v2(page_soup, heading):
     heading_text = page_soup.find(string=lambda s: s and heading in s)
     if not heading_text:
@@ -290,53 +246,6 @@ def parse_constructor_lineage_section_v2(page_soup, heading):
 
     return parsed
 
-
-def parse_constructor_lineage_section(page_soup, heading):
-    heading_text = page_soup.find(string=lambda s: s and heading in s)
-    if not heading_text:
-        return []
-
-    parsed = []
-    chain = []
-    current_name = None
-
-    for child in heading_text.next_siblings:
-        if getattr(child, "name", None) == "hr":
-            break
-
-        if isinstance(child, str):
-            text = child.replace("\n", " ").strip()
-            if not text:
-                continue
-
-            if "•" in text:
-                if chain:
-                    parsed.append(chain)
-                    chain = []
-                current_name = None
-                text = text.replace("•", "").strip()
-
-            text = text.replace("➜", "").strip()
-            if text:
-                current_name = text
-            continue
-
-        if child.name in {"a", "strong"}:
-            current_name = child.get_text(" ", strip=True)
-            continue
-
-        if child.name == "span":
-            if current_name is None:
-                continue
-
-            eras = re.findall(r"\(([^()]*)\)", child.get_text(" ", strip=True))
-            for era in eras:
-                chain.append({current_name: era.strip()})
-
-    if chain:
-        parsed.append(chain)
-
-    return parsed
 
 
 #Functions:
@@ -5286,66 +5195,8 @@ for season in seasons[index:]:
                 constructor_slug = slugify_statsf1_constructor_name(constructor_name)
                 open_url(f"https://www.statsf1.com/en/{constructor_slug}.aspx")
                 constructor_nationalities = parse_constructor_nationalities_from_page(soup)
-                filiations = []
-                team_principals = []
-
-                # ---------- Filiation ----------
-                filiation_text = soup.find(string=lambda s: s and "Filiation" in s)
-
-                if filiation_text:
-                    section = []
-
-                    for node in filiation_text.parent.next_siblings:
-                        if getattr(node, "name", None) == "hr":
-                            break
-
-                        section.append(str(node))
-
-                    html = "".join(section)
-                    chains = [c.strip() for c in html.split("•") if c.strip()]
-
-                    for chain in chains:
-                        chain_soup = BeautifulSoup(chain, "html.parser")
-
-                        lineage = []
-
-                        for tag in chain_soup.find_all(["strong", "a"]):
-                            era_tag = tag.find_next("span")
-
-                            if era_tag:
-                                era = re.search(r"\((.*?)\)", era_tag.get_text()).group(1)
-                                lineage.append({tag.get_text(strip=True): era})
-
-                        filiations.append(lineage)
-
-                # ---------- Team Principal ----------
-                principal_text = soup.find(string=lambda s: s and "Team Principal" in s)
-
-                if principal_text:
-                    section = []
-
-                    for node in principal_text.parent.next_siblings:
-                        if getattr(node, "name", None) == "hr":
-                            break
-
-                        section.append(str(node))
-
-                    html = "".join(section)
-                    chains = [c.strip() for c in html.split("•") if c.strip()]
-
-                    for chain in chains:
-                        chain_soup = BeautifulSoup(chain, "html.parser")
-
-                        principals = []
-
-                        for span in chain_soup.find_all("span"):
-                            m = re.search(r"\((.*?)\)", span.get_text())
-                            if not m:
-                                continue
-
-                            name = span.previous_sibling.strip()
-                            principals.append({name: m.group(1)})
-                        team_principals.append(principals)                                
+                filiations = parse_constructor_lineage_section_v2(soup, "Filiation")
+                team_principals = parse_constructor_lineage_section_v2(soup, "Team Principal")                               
                 cur.execute("INSERT OR IGNORE INTO Constructors (ConstructorName, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?)", (constructor_name, gp, grandprix_id))
                 cur.execute("SELECT ID FROM Constructors WHERE ConstructorName = ?", (constructor_name,))
                 constructor_id = cur.fetchone()[0]
@@ -6130,525 +5981,223 @@ for season in seasons[index:]:
 print ("All seasons processed and saved to database. Updating subtables...")
 
 
-#We update the wins, podiums, poles, fastest laps, championships and all those stats to the drivers, constructors, and other tables
-cur.execute("UPDATE Drivers SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.raceposition = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.raceposition <= 3 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.starting_grid_position = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.fastestlap = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.sprintposition = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.sprintposition <= 3 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.sprintfastestlap = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET Championships = (SELECT COUNT(*) FROM DriversChampionship WHERE DriversChampionship.driverid = Drivers.ID AND DriversChampionship.Position = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.driverid = Drivers.ID AND Drivers.needstatsupdate = 1 AND GrandPrixResults.substituteorthirddriver = 0)")
-cur.execute("UPDATE Drivers SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND racestatus LIKE '%Did not finish%' AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET HatTricks = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND raceposition = 1 AND starting_grid_position = 1 AND fastestlap = 1 AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND starting_grid_position IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND sprintstarting_grid_position IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND qualifyingposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND raceposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND sprintposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID AND sprint_qualifyingposition IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET BestChampionshipPosition = (SELECT MIN(Position) FROM DriversChampionship WHERE DriversChampionship.driverid = Drivers.ID AND Position IS NOT NULL AND Drivers.needstatsupdate = 1)")
-cur.execute("UPDATE Drivers SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.driverid = Drivers.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.driverid = Drivers.ID) THEN 1 ELSE 0 END WHERE Drivers.needstatsupdate = 1")
-
-print("Drivers stats updated.")
-
-# Update Seasons stats using a single data pass for all seasons needing refresh.
-cur.execute("SELECT Season FROM Seasons WHERE needstatsupdate = 1 ORDER BY Season")
-seasons_to_update = [row[0] for row in cur.fetchall()]
-if seasons_to_update:
-    max_season = max(seasons_to_update)
-
-    cur.execute("SELECT Season, COUNT(*) FROM GrandsPrix WHERE Season <= ? GROUP BY Season", (max_season,))
-    grand_prix_counts = {row[0]: row[1] for row in cur.fetchall()}
-
-    # Build per-season aggregates from GrandPrixResults once.
-    cur.execute("""
-        SELECT gp.Season,
-               gr.driverid,
-               gr.constructorid,
-               gr.engineid,
-               gr.teamid,
-               gr.enginemodelid,
-               gr.chassisid,
-               gr.nationalityid,
-               gr.raceposition,
-               gr.qualifyingposition,
-               gr.fastestlap,
-               gr.racepoints,
-               gr.sprintpoints,
-               gr.sprintposition,
-               gr.sprint_qualifyingposition,
-               gr.sprintfastestlap
+def update_entity_stats(cur, table_name, fk_column, has_substitute_check=False, champ_table=None, indy500_check=True):
+    """
+    Dynamically generates and executes a single-pass optimized UPDATE query 
+    for F1 entities (Drivers, Constructors, Teams, etc.).
+    """
+    
+    # Only Drivers have the substitute check for SeasonsRaced
+    sub_check = "AND gr.substituteorthirddriver = 0" if has_substitute_check else ""
+    
+    # Determine how to calculate championships
+    champ_cte = ""
+    champ_joins = ""
+    champ_sets = ""
+    
+    if champ_table:
+        # Drivers use DriverID, Constructors/Engines use ConstructorID/EngineID
+        champ_fk = "DriverID" if champ_table == "DriversChampionship" else fk_column
+        champ_cte = f"""
+        , ChampStats AS (
+            SELECT {champ_fk} AS id, 
+                   SUM(CASE WHEN Position = 1 THEN 1 ELSE 0 END) AS championships,
+                   MIN(Position) AS best_champ_pos
+            FROM {champ_table}
+            GROUP BY {champ_fk}
+        )
+        """
+        champ_joins = f"LEFT JOIN ChampStats cs ON base.id = cs.id"
+        champ_sets = """
+            Championships = COALESCE(cs.championships, 0),
+            BestChampionshipPosition = cs.best_champ_pos,
+        """
+    query = f"""
+    WITH BaseStats AS (
+        SELECT 
+            {fk_column} AS id,
+            SUM(CASE WHEN raceposition = 1 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN raceposition <= 3 THEN 1 ELSE 0 END) AS podiums,
+            SUM(CASE WHEN starting_grid_position = 1 THEN 1 ELSE 0 END) AS poles,
+            SUM(CASE WHEN fastestlap = 1 THEN 1 ELSE 0 END) AS fastestlaps,
+            SUM(CASE WHEN sprintposition = 1 THEN 1 ELSE 0 END) AS sprintwins,
+            SUM(CASE WHEN sprintposition <= 3 THEN 1 ELSE 0 END) AS sprintpodiums,
+            SUM(CASE WHEN sprintstarting_grid_position = 1 THEN 1 ELSE 0 END) AS sprintpoles,
+            SUM(CASE WHEN sprintfastestlap = 1 THEN 1 ELSE 0 END) AS sprintfastestlaps,
+            SUM(IFNULL(racepoints, 0) + IFNULL(sprintpoints, 0)) AS points,
+            
+            -- FIXED: Ensure racestatus isn't DNS or Withdrew
+            SUM(CASE WHEN racestatus IS NOT NULL 
+                      AND racestatus NOT LIKE '%Did not start%' 
+                      AND racestatus NOT LIKE '%Withdrew%' 
+                 THEN 1 ELSE 0 END) AS starts,
+                 
+            COUNT(*) AS entries,
+            
+            -- FIXED: Ensure sprintstatus actually exists, and isn't DNS or Withdrew
+            SUM(CASE WHEN sprintstatus IS NOT NULL 
+                      AND sprintstatus NOT LIKE '%Did not start%' 
+                      AND sprintstatus NOT LIKE '%Withdrew%' 
+                 THEN 1 ELSE 0 END) AS sprintstarts,
+                 
+            SUM(CASE WHEN racestatus LIKE '%Did not finish%' THEN 1 ELSE 0 END) AS dnfs,
+            MIN(starting_grid_position) AS best_grid,
+            MIN(sprintstarting_grid_position) AS best_sprint_grid,
+            MIN(qualifyingposition) AS best_qual,
+            MIN(raceposition) AS best_race,
+            MIN(sprintposition) AS best_sprint,
+            MIN(sprint_qualifyingposition) AS best_sprint_qual
+        FROM GrandPrixResults
+        WHERE {fk_column} IS NOT NULL
+        GROUP BY {fk_column}
+    ),
+    SeasonStats AS (
+        SELECT gr.{fk_column} AS id, COUNT(DISTINCT gp.Season) AS seasons_raced
         FROM GrandPrixResults gr
         JOIN GrandsPrix gp ON gr.grandprixid = gp.ID
-        WHERE gp.Season <= ?
-    """, (max_season,))
+        WHERE gr.{fk_column} IS NOT NULL {sub_check}
+        GROUP BY gr.{fk_column}
+    ),
+    Indy500Stats AS (
+        SELECT gr.{fk_column} AS id,
+               COUNT(*) AS total_races,
+               SUM(CASE WHEN gp.GrandPrixName LIKE '%Indianapolis 500' THEN 1 ELSE 0 END) AS indy_races
+        FROM GrandPrixResults gr
+        JOIN GrandsPrix gp ON gr.grandprixid = gp.ID
+        WHERE gr.{fk_column} IS NOT NULL
+        GROUP BY gr.{fk_column}
+    )
+    {champ_cte}
 
-    season_stats = {}
-    def add_if_not_none(target_set, value):
-        if value is not None:
-            target_set.add(value)
-
-    for (season, driverid, constructorid, engineid, teamid, enginemodelid,
-         chassisid, nationalityid, raceposition, qualifyingposition, fastestlap,
-         racepoints, sprintpoints, sprintposition, sprint_qualifyingposition,
-         sprintfastestlap) in cur.fetchall():
-        stats = season_stats.setdefault(season, {
-            'drivers': set(),
-            'constructors': set(),
-            'engines': set(),
-            'teams': set(),
-            'enginemodels': set(),
-            'chassis': set(),
-            'nationalities': set(),
-            'unique_winners': set(),
-            'unique_podiums': set(),
-            'unique_poles': set(),
-            'unique_fastest': set(),
-            'points_scorers': set(),
-            'unique_sprint_winners': set(),
-            'unique_sprint_podiums': set(),
-            'unique_sprint_poles': set(),
-            'unique_sprint_fastest': set(),
-            'sprint_points_scorers': set()
-        })
-
-        add_if_not_none(stats['drivers'], driverid)
-        add_if_not_none(stats['constructors'], constructorid)
-        add_if_not_none(stats['engines'], engineid)
-        add_if_not_none(stats['teams'], teamid)
-        add_if_not_none(stats['enginemodels'], enginemodelid)
-        add_if_not_none(stats['chassis'], chassisid)
-        add_if_not_none(stats['nationalities'], nationalityid)
-
-        if raceposition == 1:
-            add_if_not_none(stats['unique_winners'], driverid)
-        if raceposition is not None and raceposition <= 3:
-            add_if_not_none(stats['unique_podiums'], driverid)
-        if qualifyingposition == 1:
-            add_if_not_none(stats['unique_poles'], driverid)
-        if fastestlap == 1:
-            add_if_not_none(stats['unique_fastest'], driverid)
-        if (racepoints or 0) > 0 or (sprintpoints or 0) > 0:
-            add_if_not_none(stats['points_scorers'], driverid)
-        if sprintposition == 1:
-            add_if_not_none(stats['unique_sprint_winners'], driverid)
-        if sprintposition is not None and sprintposition <= 3:
-            add_if_not_none(stats['unique_sprint_podiums'], driverid)
-        if sprint_qualifyingposition == 1:
-            add_if_not_none(stats['unique_sprint_poles'], driverid)
-        if sprintfastestlap == 1:
-            add_if_not_none(stats['unique_sprint_fastest'], driverid)
-        if (sprintpoints or 0) > 0:
-            add_if_not_none(stats['sprint_points_scorers'], driverid)
-
-    prior_sets = {
-        'points_scorers': set(),
-        'winners': set(),
-        'podiums': set(),
-        'poles': set(),
-        'fastest': set(),
-        'sprint_winners': set(),
-        'sprint_podiums': set(),
-        'sprint_poles': set(),
-        'sprint_fastest': set(),
-        'sprint_points_scorers': set()
-    }
-
-    for season in sorted(seasons_to_update):
-        stats = season_stats.get(season, {
-            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
-            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
-            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
-            'unique_fastest': set(), 'points_scorers': set(),
-            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
-            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
-            'sprint_points_scorers': set()
-        })
-
-        total_grand_prix = grand_prix_counts.get(season, 0)
-        total_drivers = len(stats['drivers'])
-        total_constructors = len(stats['constructors'])
-        total_engines = len(stats['engines'])
-        total_teams = len(stats['teams'])
-        total_engine_models = len(stats['enginemodels'])
-        total_chassis = len(stats['chassis'])
-        total_nationalities = len(stats['nationalities'])
-        total_unique_winners = len(stats['unique_winners'])
-        total_unique_podiums = len(stats['unique_podiums'])
-        total_unique_poles = len(stats['unique_poles'])
-        total_unique_fastest = len(stats['unique_fastest'])
-        total_drivers_with_points = len(stats['points_scorers'])
-        total_first_time_points_scorers = len(stats['points_scorers'] - prior_sets['points_scorers'])
-        total_first_time_winners = len(stats['unique_winners'] - prior_sets['winners'])
-        total_first_time_podiums = len(stats['unique_podiums'] - prior_sets['podiums'])
-        total_first_time_poles = len(stats['unique_poles'] - prior_sets['poles'])
-        total_first_time_fastest = len(stats['unique_fastest'] - prior_sets['fastest'])
-        total_unique_sprint_winners = len(stats['unique_sprint_winners'])
-        total_unique_sprint_podiums = len(stats['unique_sprint_podiums'])
-        total_unique_sprint_poles = len(stats['unique_sprint_poles'])
-        total_unique_sprint_fastest = len(stats['unique_sprint_fastest'])
-        total_drivers_with_sprint_points = len(stats['sprint_points_scorers'])
-        total_first_time_sprint_winners = len(stats['unique_sprint_winners'] - prior_sets['sprint_winners'])
-        total_first_time_sprint_podiums = len(stats['unique_sprint_podiums'] - prior_sets['sprint_podiums'])
-        total_first_time_sprint_poles = len(stats['unique_sprint_poles'] - prior_sets['sprint_poles'])
-        total_first_time_sprint_fastest = len(stats['unique_sprint_fastest'] - prior_sets['sprint_fastest'])
-        total_first_time_sprint_points_scorers = len(stats['sprint_points_scorers'] - prior_sets['sprint_points_scorers'])
-
-        cur.execute("""
-            UPDATE Seasons SET
-                TotalGrandPrix = ?,
-                TotalDrivers = ?,
-                TotalConstructors = ?,
-                TotalEngines = ?,
-                TotalTeams = ?,
-                TotalEngineModels = ?,
-                TotalChassis = ?,
-                TotalNationalities = ?,
-                TotalUniqueWinners = ?,
-                TotalUniquePodiumFinishers = ?,
-                TotalUniquePolePositions = ?,
-                TotalUniqueFastestLapGetters = ?,
-                TotalDriversWithPoints = ?,
-                TotalFirstTimePointsScorers = ?,
-                TotalFirstTimeWinners = ?,
-                TotalFirstTimePodiumFinishers = ?,
-                TotalFirstTimePoleSitters = ?,
-                TotalFirstTimeFastestLapGetters = ?,
-                TotalUniqueSprintWinners = ?,
-                TotalUniqueSprintPodiumFinishers = ?,
-                TotalUniqueSprintPolePositions = ?,
-                TotalUniqueSprintFastestLapGetters = ?,
-                TotalDriversWithSprintPoints = ?,
-                TotalFirstTimeSprintWinners = ?,
-                TotalFirstTimeSprintPodiumFinishers = ?,
-                TotalFirstTimeSprintPoleSitters = ?,
-                TotalFirstTimeSprintFastestLapGetters = ?,
-                TotalFirstTimeSprintPointsScorers = ?
-            WHERE Season = ?
-        """, (
-            total_grand_prix,
-            total_drivers,
-            total_constructors,
-            total_engines,
-            total_teams,
-            total_engine_models,
-            total_chassis,
-            total_nationalities,
-            total_unique_winners,
-            total_unique_podiums,
-            total_unique_poles,
-            total_unique_fastest,
-            total_drivers_with_points,
-            total_first_time_points_scorers,
-            total_first_time_winners,
-            total_first_time_podiums,
-            total_first_time_poles,
-            total_first_time_fastest,
-            total_unique_sprint_winners,
-            total_unique_sprint_podiums,
-            total_unique_sprint_poles,
-            total_unique_sprint_fastest,
-            total_drivers_with_sprint_points,
-            total_first_time_sprint_winners,
-            total_first_time_sprint_podiums,
-            total_first_time_sprint_poles,
-            total_first_time_sprint_fastest,
-            total_first_time_sprint_points_scorers,
-            season
-        ))
-
-        prior_sets['points_scorers'].update(stats['points_scorers'])
-        prior_sets['winners'].update(stats['unique_winners'])
-        prior_sets['podiums'].update(stats['unique_podiums'])
-        prior_sets['poles'].update(stats['unique_poles'])
-        prior_sets['fastest'].update(stats['unique_fastest'])
-        prior_sets['sprint_winners'].update(stats['unique_sprint_winners'])
-        prior_sets['sprint_podiums'].update(stats['unique_sprint_podiums'])
-        prior_sets['sprint_poles'].update(stats['unique_sprint_poles'])
-        prior_sets['sprint_fastest'].update(stats['unique_sprint_fastest'])
-        prior_sets['sprint_points_scorers'].update(stats['sprint_points_scorers'])
-
-print("Seasons stats updated.")
+    UPDATE {table_name}
+    SET 
+        Wins = COALESCE(base.wins, 0),
+        Podiums = COALESCE(base.podiums, 0),
+        Poles = COALESCE(base.poles, 0),
+        FastestLaps = COALESCE(base.fastestlaps, 0),
+        SprintWins = COALESCE(base.sprintwins, 0),
+        SprintPodiums = COALESCE(base.sprintpodiums, 0),
+        SprintPoles = COALESCE(base.sprintpoles, 0),
+        SprintFastestLaps = COALESCE(base.sprintfastestlaps, 0),
+        Points = COALESCE(base.points, 0),
+        Starts = COALESCE(base.starts, 0),
+        Entries = COALESCE(base.entries, 0),
+        SprintStarts = COALESCE(base.sprintstarts, 0),
+        DNFs = COALESCE(base.dnfs, 0),
+        BestGridPosition = base.best_grid,
+        BestSprintGridPosition = base.best_sprint_grid,
+        BestQualifyingPosition = base.best_qual,
+        BestRacePosition = base.best_race,
+        BestSprintPosition = base.best_sprint,
+        BestSprintQualifyingPosition = base.best_sprint_qual,
+        SeasonsRaced = COALESCE(ss.seasons_raced, 0),
+        {"indy500only = CASE WHEN i.total_races > 0 AND i.total_races = i.indy_races THEN 1 ELSE 0 END," if indy500_check else ""}
+        {champ_sets}
+        needstatsupdate = 0
+    FROM BaseStats base
+    LEFT JOIN SeasonStats ss ON base.id = ss.id
+    LEFT JOIN Indy500Stats i ON base.id = i.id
+    {champ_joins}
+    WHERE {table_name}.ID = base.id 
+      AND {table_name}.needstatsupdate = 1; 
+    """
+    
+    cur.execute(query)
+    print(f"{table_name} stats updated.")
 
 
-def get_grand_slam_candidates(cur):
-    cur.execute("""
-        SELECT L.grandprixid, L.lap, L.driverid, L.position
+# --- 1. Update Standard Entity Tables ---
+update_entity_stats(cur, "Drivers", "driverid", has_substitute_check=True, champ_table="DriversChampionship")
+update_entity_stats(cur, "Constructors", "constructorid", champ_table="ConstructorsChampionship")
+update_entity_stats(cur, "Engines", "engineid")
+update_entity_stats(cur, "Teams", "teamid")
+update_entity_stats(cur, "Chassis", "chassisid")
+update_entity_stats(cur, "EngineModels", "enginemodelid")
+update_entity_stats(cur, "Tyres", "tyreid")
+update_entity_stats(cur, "Nationalities", "nationalityid", indy500_check=False)
+
+# --- 2. Update Highly Specific Driver Stats (HatTricks & GrandSlams) ---
+# Hat Tricks
+cur.execute("""
+    UPDATE Drivers
+    SET HatTricks = COALESCE(ht.hattricks, 0)
+    FROM (
+        SELECT driverid, COUNT(*) AS hattricks
+        FROM GrandPrixResults
+        WHERE raceposition = 1 AND starting_grid_position = 1 AND fastestlap = 1
+        GROUP BY driverid
+    ) AS ht
+    WHERE Drivers.ID = ht.driverid AND Drivers.needstatsupdate = 1;
+""")
+
+# Grand Slams (Led Every Lap)
+cur.execute("""
+    WITH RaceLaps AS (
+        SELECT L.grandprixid, L.driverid, COUNT(*) AS total_laps, 
+               SUM(CASE WHEN L.position = 1 THEN 1 ELSE 0 END) AS laps_led
         FROM LapByLap L
         JOIN Sessions S ON L.SessionID = S.ID
-        JOIN GrandPrixResults G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
-        WHERE S.SessionName = 'Race' AND G.driverid IN (SELECT ID FROM Drivers WHERE needstatsupdate = 1)
-    """)
-    rows = cur.fetchall()
-
-    race_laps = defaultdict(set)
-    driver_lap_leads = defaultdict(int)
-
-    for raceID, lapNumber, driverID, position in rows:
-        race_laps[raceID].add(lapNumber)
-        if position == 1:
-            driver_lap_leads[(driverID, raceID)] += 1
-
-    led_every_lap_set = set()
-    for (driverID, raceID), laps_led in driver_lap_leads.items():
-        if laps_led == len(race_laps[raceID]):
-            led_every_lap_set.add((driverID, raceID))
-
-    return led_every_lap_set
-
-led_every_lap_set = get_grand_slam_candidates(cur)
-
-cur.execute("""
-    SELECT g.driverid, g.grandprixid
-    FROM GrandPrixResults g
-    JOIN Drivers d ON g.driverid = d.ID
-    WHERE g.raceposition = 1 
-    AND g.starting_grid_position = 1 
-    AND g.fastestlap = 1
-    AND g.racestatus NOT LIKE '%Did not finish%'
-    AND g.racestatus NOT LIKE '%Did not start%'
-    AND g.racestatus NOT LIKE '%Disqualified%'
-    AND d.needstatsupdate = 1
+        WHERE S.SessionName = 'Race'
+        GROUP BY L.grandprixid, L.driverid
+    ),
+    LedEveryLap AS (
+        SELECT driverid, grandprixid 
+        FROM RaceLaps 
+        WHERE total_laps = laps_led AND total_laps > 0
+    ),
+    GrandSlams AS (
+        SELECT g.driverid, COUNT(*) AS grand_slams
+        FROM GrandPrixResults g
+        JOIN LedEveryLap lel ON g.driverid = lel.driverid AND g.grandprixid = lel.grandprixid
+        WHERE g.raceposition = 1 AND g.starting_grid_position = 1 AND g.fastestlap = 1
+        GROUP BY g.driverid
+    )
+    UPDATE Drivers 
+    SET GrandSlams = COALESCE(gs.grand_slams, 0)
+    FROM GrandSlams gs
+    WHERE Drivers.ID = gs.driverid AND Drivers.needstatsupdate = 1;
 """)
-possible_grandslams = cur.fetchall()
 
-grand_slam_counter = Counter()
+# --- 3. Update Constructors Specific Stats (1-2 Finishes) ---
+cur.execute("""
+    UPDATE Constructors
+    SET OneTwos = COALESCE(ot.one_twos, 0)
+    FROM (
+        SELECT constructorid, COUNT(*) AS one_twos
+        FROM (
+            SELECT constructorid, grandprixid
+            FROM GrandPrixResults
+            WHERE raceposition IN (1, 2)
+            GROUP BY constructorid, grandprixid
+            HAVING COUNT(DISTINCT raceposition) = 2
+        )
+        GROUP BY constructorid
+    ) AS ot
+    WHERE Constructors.ID = ot.constructorid AND Constructors.needstatsupdate = 1;
+""")
 
-for driverID, raceID in possible_grandslams:
-    if (driverID, raceID) in led_every_lap_set:
-        grand_slam_counter[driverID] += 1
-
-for driverID, count in grand_slam_counter.items():
-    cur.execute("UPDATE Drivers SET GrandSlams = ? WHERE ID = ?", (count, driverID))
-
-
-#constructors now:
-cur.execute("UPDATE Constructors SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.raceposition = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.raceposition <= 3 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.starting_grid_position = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.fastestlap = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintposition = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintposition <= 3 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.sprintfastestlap = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET OneTwos = (SELECT COUNT(*) FROM (SELECT grandprixid FROM GrandPrixResults g WHERE g.constructorid = Constructors.ID AND g.raceposition IN (1,2) GROUP BY grandprixid HAVING COUNT(DISTINCT g.raceposition) = 2)) WHERE Constructors.needstatsupdate = 1")
-cur.execute("UPDATE Constructors SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.constructorid = Constructors.ID AND ConstructorsChampionship.Position = 1 AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND racestatus LIKE '%Did not finish%' AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND starting_grid_position IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprintstarting_grid_position IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND qualifyingposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND raceposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprintposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID AND sprint_qualifyingposition IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET BestChampionshipPosition = (SELECT MIN(Position) FROM ConstructorsChampionship WHERE ConstructorsChampionship.constructorid = Constructors.ID AND Position IS NOT NULL AND Constructors.needstatsupdate = 1)")
-cur.execute("UPDATE Constructors SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.constructorid = Constructors.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.constructorid = Constructors.ID) THEN 1 ELSE 0 END WHERE Constructors.needstatsupdate = 1")
-print("Constructors stats updated.")
-
-#exact same thing for engines as constructors
-cur.execute("UPDATE Engines SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.raceposition = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.raceposition <= 3 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.starting_grid_position = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.fastestlap = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.sprintposition = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.sprintposition <= 3 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.sprintfastestlap = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Championships = (SELECT COUNT(*) FROM ConstructorsChampionship WHERE ConstructorsChampionship.engineid = Engines.ID AND ConstructorsChampionship.Position = 1 AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.engineid = Engines.ID AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND racestatus LIKE '%Did not finish%' AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND starting_grid_position IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprintstarting_grid_position IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND qualifyingposition IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND raceposition IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprintposition IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID AND sprint_qualifyingposition IS NOT NULL AND Engines.needstatsupdate = 1)")
-cur.execute("UPDATE Engines SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.engineid = Engines.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.engineid = Engines.ID) THEN 1 ELSE 0 END WHERE Engines.needstatsupdate = 1")
-print("Engines stats updated.")
-
-#chassis now:
-cur.execute("UPDATE Chassis SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.raceposition = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.raceposition <= 3 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.starting_grid_position = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.fastestlap = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.sprintposition = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.sprintposition <= 3 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.sprintfastestlap = 1 AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.chassisid = Chassis.ID AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND racestatus LIKE '%Did not finish%' AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND starting_grid_position IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprintstarting_grid_position IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND qualifyingposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND raceposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprintposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID AND sprint_qualifyingposition IS NOT NULL AND Chassis.needstatsupdate = 1)")
-cur.execute("UPDATE Chassis SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.chassisid = Chassis.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.chassisid = Chassis.ID) THEN 1 ELSE 0 END WHERE Chassis.needstatsupdate = 1")
-print("Chassis stats updated.")
-
-#engine models now:
-cur.execute("UPDATE EngineModels SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.raceposition = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.raceposition <= 3 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.starting_grid_position = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.fastestlap = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintposition = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintposition <= 3 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.sprintfastestlap = 1 AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND racestatus LIKE '%Did not finish%' AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND starting_grid_position IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprintstarting_grid_position IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND qualifyingposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND raceposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprintposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND sprint_qualifyingposition IS NOT NULL AND EngineModels.needstatsupdate = 1)")
-cur.execute("UPDATE EngineModels SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.enginemodelid = EngineModels.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.enginemodelid = EngineModels.ID) THEN 1 ELSE 0 END WHERE EngineModels.needstatsupdate = 1")
-print("EngineModels stats updated.")
-
-#tyres now:
-cur.execute("UPDATE Tyres SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.raceposition = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.raceposition <= 3 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.starting_grid_position = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.fastestlap = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.sprintposition = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.sprintposition <= 3 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.sprintfastestlap = 1 AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.tyreid = Tyres.ID AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND racestatus LIKE '%Did not finish%' AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND starting_grid_position IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND sprintstarting_grid_position IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND qualifyingposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND raceposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND sprintposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID AND sprint_qualifyingposition IS NOT NULL AND Tyres.needstatsupdate = 1)")
-cur.execute("UPDATE Tyres SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.tyreid = Tyres.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.tyreid = Tyres.ID) THEN 1 ELSE 0 END WHERE Tyres.needstatsupdate = 1")
-print("Tyres stats updated.")
-
-#teams too:
-cur.execute("UPDATE Teams SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.raceposition = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.raceposition <= 3 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.starting_grid_position = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.fastestlap = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.sprintposition = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.sprintposition <= 3 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.sprintfastestlap = 1 AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.teamid = Teams.ID AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND racestatus LIKE '%Did not finish%' AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND starting_grid_position IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND sprintstarting_grid_position IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND qualifyingposition IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND raceposition IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND sprintposition IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID AND sprint_qualifyingposition IS NOT NULL AND Teams.needstatsupdate = 1)")
-cur.execute("UPDATE Teams SET indy500only = CASE WHEN (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID) > 0 AND (SELECT COUNT(*) FROM GrandPrixResults JOIN GrandsPrix ON GrandPrixResults.grandprixid = GrandsPrix.ID WHERE GrandPrixResults.teamid = Teams.ID AND GrandsPrix.GrandPrixName LIKE '%Indianapolis 500') = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.teamid = Teams.ID) THEN 1 ELSE 0 END WHERE Teams.needstatsupdate = 1")
-print("Teams stats updated.")
-
-#nationalities:
-cur.execute("UPDATE Nationalities SET Wins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.raceposition = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Podiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.raceposition <= 3 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Poles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.starting_grid_position = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET FastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.fastestlap = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintWins = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.sprintposition = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintPodiums = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.sprintposition <= 3 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintPoles = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.sprintstarting_grid_position = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintFastestLaps = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.sprintfastestlap = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Championships = (SELECT COUNT(*) FROM DriversChampionship JOIN Drivers ON DriversChampionship.DriverID = Drivers.ID WHERE Drivers.NationalityID = Nationalities.ID AND DriversChampionship.Position = 1 AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SeasonsRaced = (SELECT COUNT(DISTINCT GrandsPrix.Season) FROM GrandPrixResults JOIN GrandsPrix ON GrandsPrix.ID = GrandPrixResults.grandprixid WHERE GrandPrixResults.nationalityid = Nationalities.ID AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Points = (SELECT IFNULL(SUM(IFNULL(GrandPrixResults.racepoints, 0) + IFNULL(GrandPrixResults.sprintpoints, 0)), 0) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Starts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND GrandPrixResults.racestatus NOT LIKE '%Did not start%' AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET Entries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintStarts = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND (GrandPrixResults.sprintstatus NOT LIKE '%Did not start%' OR GrandPrixResults.sprintstatus IS NULL) AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET SprintEntries = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET DNFs = (SELECT COUNT(*) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND racestatus LIKE '%Did not finish%' AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestGridPosition = (SELECT MIN(starting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND starting_grid_position IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestSprintGridPosition = (SELECT MIN(sprintstarting_grid_position) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND sprintstarting_grid_position IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestQualifyingPosition = (SELECT MIN(qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND qualifyingposition IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestRacePosition = (SELECT MIN(raceposition) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND raceposition IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestSprintPosition = (SELECT MIN(sprintposition) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND sprintposition IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-cur.execute("UPDATE Nationalities SET BestSprintQualifyingPosition = (SELECT MIN(sprint_qualifyingposition) FROM GrandPrixResults WHERE GrandPrixResults.nationalityid = Nationalities.ID AND sprint_qualifyingposition IS NOT NULL AND Nationalities.needstatsupdate = 1)")
-print("Nationalities stats updated.")
-
+# --- 4. Update Laps Led (LapsByLap iteration) ---
 def update_laps_led_for_component(cur, component_table, component_id_column):
-    # Grand Prix Laps Led
-    query_gp = f"""
-    SELECT G.{component_id_column}, COUNT(*) AS laps_led
-    FROM LapByLap AS L
-    JOIN Sessions AS S ON L.SessionID = S.ID
-    JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
-    JOIN {component_table} AS C ON G.{component_id_column} = C.ID
-    WHERE L.position = 1
-      AND S.SessionName = 'Race'
-      AND G.{component_id_column} IS NOT NULL
-      AND C.needstatsupdate = 1
-    GROUP BY G.{component_id_column}
+    query = f"""
+    WITH LapsLedStats AS (
+        SELECT 
+            G.{component_id_column} AS id,
+            SUM(CASE WHEN S.SessionName = 'Race' THEN 1 ELSE 0 END) AS gp_laps_led,
+            SUM(CASE WHEN S.SessionName IN ('Sprint', 'Sprint Qualifying') THEN 1 ELSE 0 END) AS sprint_laps_led
+        FROM LapByLap AS L
+        JOIN Sessions AS S ON L.SessionID = S.ID
+        JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
+        WHERE L.position = 1 AND G.{component_id_column} IS NOT NULL
+        GROUP BY G.{component_id_column}
+    )
+    UPDATE {component_table}
+    SET 
+        GrandPrixLapsLed = COALESCE(lls.gp_laps_led, 0),
+        SprintLapsLed = COALESCE(lls.sprint_laps_led, 0)
+    FROM LapsLedStats lls
+    WHERE {component_table}.ID = lls.id AND {component_table}.needstatsupdate = 1;
     """
-    cur.execute(query_gp)
-    results_gp = cur.fetchall()
-
-    for component_id, laps_led in results_gp:
-        cur.execute(
-            f"UPDATE {component_table} SET GrandPrixLapsLed = ? WHERE ID = ?",
-            (laps_led, component_id)
-        )
-
-    # Sprint Laps Led
-    query_sprint = f"""
-    SELECT G.{component_id_column}, COUNT(*) AS laps_led
-    FROM LapByLap AS L
-    JOIN Sessions AS S ON L.SessionID = S.ID
-    JOIN GrandPrixResults AS G ON L.driverid = G.driverid AND L.grandprixid = G.grandprixid
-    JOIN {component_table} AS C ON G.{component_id_column} = C.ID
-    WHERE L.position = 1
-      AND S.SessionName IN ('Sprint', 'Sprint Qualifying')
-      AND G.{component_id_column} IS NOT NULL
-      AND C.needstatsupdate = 1
-    GROUP BY G.{component_id_column}
-    """
-    cur.execute(query_sprint)
-    results_sprint = cur.fetchall()
-
-    for component_id, laps_led in results_sprint:
-        cur.execute(
-            f"UPDATE {component_table} SET SprintLapsLed = ? WHERE ID = ?",
-            (laps_led, component_id)
-        )
-
+    cur.execute(query)
 
 update_laps_led_for_component(cur, "Constructors", "constructorid")
 update_laps_led_for_component(cur, "Engines", "engineid")
@@ -6660,23 +6209,13 @@ update_laps_led_for_component(cur, "Drivers", "driverid")
 update_laps_led_for_component(cur, "Nationalities", "nationalityid")
 print("GrandPrixLapsLed and SprintLapsLed stats updated.")
 
+# Flip all things back to 0 now that we're done
+tables_to_reset = ["Drivers", "Constructors", "Engines", "Chassis", "EngineModels", "Tyres", "Teams", "Nationalities", "Seasons"]
+for table in tables_to_reset:
+    cur.execute(f"UPDATE {table} SET needstatsupdate = 0 WHERE needstatsupdate = 1")
 
-
-#flip all things back to 0 now that we're done
-cur.execute("UPDATE Drivers SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Constructors SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Engines SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Chassis SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE EngineModels SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Tyres SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Teams SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Nationalities SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-cur.execute("UPDATE Seasons SET needstatsupdate = 0 WHERE needstatsupdate = 1")
-
-print("All stats updated successfully. Closing database connection...")
-
-
-conn.commit() 
+conn.commit()
+print("All stats successfully updated and flags reset.")
 
 print("Running database optimization (this may take a moment)...")
 cur.execute("VACUUM")
