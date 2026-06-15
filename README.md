@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 Monaco Grand Prix**
+**Last updated: 2026 Barcelona-Catalunya Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:

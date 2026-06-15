@@ -232,6 +232,117 @@ update_laps_led_for_component(cur, "Drivers", "driverid")
 update_laps_led_for_component(cur, "Nationalities", "nationalityid")
 print("GrandPrixLapsLed and SprintLapsLed stats updated.")
 
+cur.execute("SELECT Season FROM Seasons WHERE needstatsupdate = 1 ORDER BY Season")
+seasons_to_update = [row[0] for row in cur.fetchall()]
+
+if seasons_to_update:
+    max_season = max(seasons_to_update)
+
+    cur.execute("SELECT Season, COUNT(*) FROM GrandsPrix WHERE Season <= ? GROUP BY Season", (max_season,))
+    grand_prix_counts = {row[0]: row[1] for row in cur.fetchall()}
+
+    cur.execute("""
+        SELECT gp.Season,
+               gr.driverid, gr.constructorid, gr.engineid, gr.teamid, gr.enginemodelid,
+               gr.chassisid, gr.nationalityid, gr.raceposition, gr.qualifyingposition,
+               gr.fastestlap, gr.racepoints, gr.sprintpoints, gr.sprintposition,
+               gr.sprint_qualifyingposition, gr.sprintfastestlap
+        FROM GrandPrixResults gr
+        JOIN GrandsPrix gp ON gr.grandprixid = gp.ID
+        WHERE gp.Season <= ?
+    """, (max_season,))
+
+    season_stats = {}
+    def add_if_not_none(target_set, value):
+        if value is not None:
+            target_set.add(value)
+
+    for (season, driverid, constructorid, engineid, teamid, enginemodelid,
+         chassisid, nationalityid, raceposition, qualifyingposition, fastestlap,
+         racepoints, sprintpoints, sprintposition, sprint_qualifyingposition,
+         sprintfastestlap) in cur.fetchall():
+        
+        stats = season_stats.setdefault(season, {
+            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
+            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
+            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
+            'unique_fastest': set(), 'points_scorers': set(),
+            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        add_if_not_none(stats['drivers'], driverid)
+        add_if_not_none(stats['constructors'], constructorid)
+        add_if_not_none(stats['engines'], engineid)
+        add_if_not_none(stats['teams'], teamid)
+        add_if_not_none(stats['enginemodels'], enginemodelid)
+        add_if_not_none(stats['chassis'], chassisid)
+        add_if_not_none(stats['nationalities'], nationalityid)
+
+        if raceposition == 1: add_if_not_none(stats['unique_winners'], driverid)
+        if raceposition is not None and raceposition <= 3: add_if_not_none(stats['unique_podiums'], driverid)
+        if qualifyingposition == 1: add_if_not_none(stats['unique_poles'], driverid)
+        if fastestlap == 1: add_if_not_none(stats['unique_fastest'], driverid)
+        if (racepoints or 0) > 0 or (sprintpoints or 0) > 0: add_if_not_none(stats['points_scorers'], driverid)
+        
+        if sprintposition == 1: add_if_not_none(stats['unique_sprint_winners'], driverid)
+        if sprintposition is not None and sprintposition <= 3: add_if_not_none(stats['unique_sprint_podiums'], driverid)
+        if sprint_qualifyingposition == 1: add_if_not_none(stats['unique_sprint_poles'], driverid)
+        if sprintfastestlap == 1: add_if_not_none(stats['unique_sprint_fastest'], driverid)
+        if (sprintpoints or 0) > 0: add_if_not_none(stats['sprint_points_scorers'], driverid)
+
+    prior_sets = {
+        'points_scorers': set(), 'winners': set(), 'podiums': set(), 'poles': set(),
+        'fastest': set(), 'sprint_winners': set(), 'sprint_podiums': set(),
+        'sprint_poles': set(), 'sprint_fastest': set(), 'sprint_points_scorers': set()
+    }
+
+    for season in sorted(seasons_to_update):
+        stats = season_stats.get(season, {
+            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
+            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
+            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
+            'unique_fastest': set(), 'points_scorers': set(),
+            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        cur.execute("""
+            UPDATE Seasons SET
+                TotalGrandPrix = ?, TotalDrivers = ?, TotalConstructors = ?, TotalEngines = ?,
+                TotalTeams = ?, TotalEngineModels = ?, TotalChassis = ?, TotalNationalities = ?,
+                TotalUniqueWinners = ?, TotalUniquePodiumFinishers = ?, TotalUniquePolePositions = ?, TotalUniqueFastestLapGetters = ?,
+                TotalDriversWithPoints = ?, TotalFirstTimePointsScorers = ?, TotalFirstTimeWinners = ?, TotalFirstTimePodiumFinishers = ?,
+                TotalFirstTimePoleSitters = ?, TotalFirstTimeFastestLapGetters = ?, TotalUniqueSprintWinners = ?, TotalUniqueSprintPodiumFinishers = ?,
+                TotalUniqueSprintPolePositions = ?, TotalUniqueSprintFastestLapGetters = ?, TotalDriversWithSprintPoints = ?, TotalFirstTimeSprintWinners = ?,
+                TotalFirstTimeSprintPodiumFinishers = ?, TotalFirstTimeSprintPoleSitters = ?, TotalFirstTimeSprintFastestLapGetters = ?, TotalFirstTimeSprintPointsScorers = ?
+            WHERE Season = ?
+        """, (
+            grand_prix_counts.get(season, 0), len(stats['drivers']), len(stats['constructors']), len(stats['engines']),
+            len(stats['teams']), len(stats['enginemodels']), len(stats['chassis']), len(stats['nationalities']),
+            len(stats['unique_winners']), len(stats['unique_podiums']), len(stats['unique_poles']), len(stats['unique_fastest']),
+            len(stats['points_scorers']), len(stats['points_scorers'] - prior_sets['points_scorers']), len(stats['unique_winners'] - prior_sets['winners']), len(stats['unique_podiums'] - prior_sets['podiums']),
+            len(stats['unique_poles'] - prior_sets['poles']), len(stats['unique_fastest'] - prior_sets['fastest']), len(stats['unique_sprint_winners']), len(stats['unique_sprint_podiums']),
+            len(stats['unique_sprint_poles']), len(stats['unique_sprint_fastest']), len(stats['sprint_points_scorers']), len(stats['unique_sprint_winners'] - prior_sets['sprint_winners']),
+            len(stats['unique_sprint_podiums'] - prior_sets['sprint_podiums']), len(stats['unique_sprint_poles'] - prior_sets['sprint_poles']), len(stats['unique_sprint_fastest'] - prior_sets['sprint_fastest']), len(stats['sprint_points_scorers'] - prior_sets['sprint_points_scorers']),
+            season
+        ))
+
+        prior_sets['points_scorers'].update(stats['points_scorers'])
+        prior_sets['winners'].update(stats['unique_winners'])
+        prior_sets['podiums'].update(stats['unique_podiums'])
+        prior_sets['poles'].update(stats['unique_poles'])
+        prior_sets['fastest'].update(stats['unique_fastest'])
+        prior_sets['sprint_winners'].update(stats['unique_sprint_winners'])
+        prior_sets['sprint_podiums'].update(stats['unique_sprint_podiums'])
+        prior_sets['sprint_poles'].update(stats['unique_sprint_poles'])
+        prior_sets['sprint_fastest'].update(stats['unique_sprint_fastest'])
+        prior_sets['sprint_points_scorers'].update(stats['sprint_points_scorers'])
+
+print("Seasons stats updated.")
+
 # Flip all things back to 0 now that we're done
 tables_to_reset = ["Drivers", "Constructors", "Engines", "Chassis", "EngineModels", "Tyres", "Teams", "Nationalities", "Seasons"]
 for table in tables_to_reset:

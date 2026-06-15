@@ -3752,6 +3752,8 @@ def fetch_tracinginsights_pitstops(year, grandprix_name):
     # Format Grand Prix name for URL (e.g., "Bahrain Grand Prix" -> "Bahrain%20Grand%20Prix")
     if year >= 2021 and grandprix_name.endswith("Mexican Grand Prix"):
         grandprix_name = grandprix_name.replace("Mexican Grand Prix", "Mexico City Grand Prix")
+    elif year >= 2026 and grandprix_name.endswith("Barcelona-Catalunya Grand Prix"):
+        grandprix_name = grandprix_name.replace("Barcelona-Catalunya Grand Prix", "Barcelona Grand Prix")
     gp_encoded = urllib.parse.quote(grandprix_name.replace(str(year), '').strip())
     url = f"https://raw.githubusercontent.com/TracingInsights-Archive/PitStops/main/{year}/{gp_encoded}.json"
     retries = 0
@@ -4305,6 +4307,8 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                 gp_name = grandprix_name
                                 if gp_name == "Mexican Grand Prix":
                                     gp_name = "Mexico City Grand Prix" if year_int >= 2021 else "Mexico"
+                                elif gp_name == "Barcelona-Catalunya Grand Prix" and year_int >= 2026:
+                                    gp_name = "Barcelona Grand Prix"
                                 circuit_name = gp_name.replace(" Grand Prix", "").strip()
                                 
                                 # Map session type to fastf1 session name
@@ -4332,7 +4336,9 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                 continue  
                             #skip drivers who did not start:
                             if grandprix_name == "Mexican Grand Prix" and year >= 2020:
-                                grandprix_name = "Mexico City Grand Prix"                            
+                                grandprix_name = "Mexico City Grand Prix"  
+                            elif grandprix_name == "Barcelona-Catalunya Grand Prix" and year >= 2026:  
+                                grandprix_name = "Barcelona Grand Prix"                        
                             driversintracinginsightssession = json.loads(urllib.request.urlopen(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}/{urllib.parse.quote(grandprix_name)}/{session_}/drivers.json").read().decode('utf-8'))          
                             for THEABBREVIATION in resolved_driver_map:
                                 if normalize_name(resolved_driver_map[THEABBREVIATION]['driver'].lower()) == normalize_name(driver_fullname.lower()):
@@ -5401,6 +5407,8 @@ for season in seasons[index:]:
                 gp_ = gp
                 if year >= 2021 and gp.endswith('Mexican Grand Prix'):
                     gp_ = gp.replace('Mexican Grand Prix', 'Mexico City Grand Prix')
+                elif year >= 2026 and gp.endswith('Barcelona-Catalunya Grand Prix'):
+                    gp_ = gp.replace('Barcelona-Catalunya Grand Prix', 'Barcelona Grand Prix')
                 if year >= 2018:
                     fp1, fp2, fp3, q1, q2, q3, sq1, sq2, sq3, s = None, None, None, None, None, None, None, None, None, None
                     if dest:
@@ -6198,6 +6206,117 @@ def update_laps_led_for_component(cur, component_table, component_id_column):
     WHERE {component_table}.ID = lls.id AND {component_table}.needstatsupdate = 1;
     """
     cur.execute(query)
+
+cur.execute("SELECT Season FROM Seasons WHERE needstatsupdate = 1 ORDER BY Season")
+seasons_to_update = [row[0] for row in cur.fetchall()]
+
+if seasons_to_update:
+    max_season = max(seasons_to_update)
+
+    cur.execute("SELECT Season, COUNT(*) FROM GrandsPrix WHERE Season <= ? GROUP BY Season", (max_season,))
+    grand_prix_counts = {row[0]: row[1] for row in cur.fetchall()}
+
+    cur.execute("""
+        SELECT gp.Season,
+               gr.driverid, gr.constructorid, gr.engineid, gr.teamid, gr.enginemodelid,
+               gr.chassisid, gr.nationalityid, gr.raceposition, gr.qualifyingposition,
+               gr.fastestlap, gr.racepoints, gr.sprintpoints, gr.sprintposition,
+               gr.sprint_qualifyingposition, gr.sprintfastestlap
+        FROM GrandPrixResults gr
+        JOIN GrandsPrix gp ON gr.grandprixid = gp.ID
+        WHERE gp.Season <= ?
+    """, (max_season,))
+
+    season_stats = {}
+    def add_if_not_none(target_set, value):
+        if value is not None:
+            target_set.add(value)
+
+    for (season, driverid, constructorid, engineid, teamid, enginemodelid,
+         chassisid, nationalityid, raceposition, qualifyingposition, fastestlap,
+         racepoints, sprintpoints, sprintposition, sprint_qualifyingposition,
+         sprintfastestlap) in cur.fetchall():
+        
+        stats = season_stats.setdefault(season, {
+            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
+            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
+            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
+            'unique_fastest': set(), 'points_scorers': set(),
+            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        add_if_not_none(stats['drivers'], driverid)
+        add_if_not_none(stats['constructors'], constructorid)
+        add_if_not_none(stats['engines'], engineid)
+        add_if_not_none(stats['teams'], teamid)
+        add_if_not_none(stats['enginemodels'], enginemodelid)
+        add_if_not_none(stats['chassis'], chassisid)
+        add_if_not_none(stats['nationalities'], nationalityid)
+
+        if raceposition == 1: add_if_not_none(stats['unique_winners'], driverid)
+        if raceposition is not None and raceposition <= 3: add_if_not_none(stats['unique_podiums'], driverid)
+        if qualifyingposition == 1: add_if_not_none(stats['unique_poles'], driverid)
+        if fastestlap == 1: add_if_not_none(stats['unique_fastest'], driverid)
+        if (racepoints or 0) > 0 or (sprintpoints or 0) > 0: add_if_not_none(stats['points_scorers'], driverid)
+        
+        if sprintposition == 1: add_if_not_none(stats['unique_sprint_winners'], driverid)
+        if sprintposition is not None and sprintposition <= 3: add_if_not_none(stats['unique_sprint_podiums'], driverid)
+        if sprint_qualifyingposition == 1: add_if_not_none(stats['unique_sprint_poles'], driverid)
+        if sprintfastestlap == 1: add_if_not_none(stats['unique_sprint_fastest'], driverid)
+        if (sprintpoints or 0) > 0: add_if_not_none(stats['sprint_points_scorers'], driverid)
+
+    prior_sets = {
+        'points_scorers': set(), 'winners': set(), 'podiums': set(), 'poles': set(),
+        'fastest': set(), 'sprint_winners': set(), 'sprint_podiums': set(),
+        'sprint_poles': set(), 'sprint_fastest': set(), 'sprint_points_scorers': set()
+    }
+
+    for season in sorted(seasons_to_update):
+        stats = season_stats.get(season, {
+            'drivers': set(), 'constructors': set(), 'engines': set(), 'teams': set(),
+            'enginemodels': set(), 'chassis': set(), 'nationalities': set(),
+            'unique_winners': set(), 'unique_podiums': set(), 'unique_poles': set(),
+            'unique_fastest': set(), 'points_scorers': set(),
+            'unique_sprint_winners': set(), 'unique_sprint_podiums': set(),
+            'unique_sprint_poles': set(), 'unique_sprint_fastest': set(),
+            'sprint_points_scorers': set()
+        })
+
+        cur.execute("""
+            UPDATE Seasons SET
+                TotalGrandPrix = ?, TotalDrivers = ?, TotalConstructors = ?, TotalEngines = ?,
+                TotalTeams = ?, TotalEngineModels = ?, TotalChassis = ?, TotalNationalities = ?,
+                TotalUniqueWinners = ?, TotalUniquePodiumFinishers = ?, TotalUniquePolePositions = ?, TotalUniqueFastestLapGetters = ?,
+                TotalDriversWithPoints = ?, TotalFirstTimePointsScorers = ?, TotalFirstTimeWinners = ?, TotalFirstTimePodiumFinishers = ?,
+                TotalFirstTimePoleSitters = ?, TotalFirstTimeFastestLapGetters = ?, TotalUniqueSprintWinners = ?, TotalUniqueSprintPodiumFinishers = ?,
+                TotalUniqueSprintPolePositions = ?, TotalUniqueSprintFastestLapGetters = ?, TotalDriversWithSprintPoints = ?, TotalFirstTimeSprintWinners = ?,
+                TotalFirstTimeSprintPodiumFinishers = ?, TotalFirstTimeSprintPoleSitters = ?, TotalFirstTimeSprintFastestLapGetters = ?, TotalFirstTimeSprintPointsScorers = ?
+            WHERE Season = ?
+        """, (
+            grand_prix_counts.get(season, 0), len(stats['drivers']), len(stats['constructors']), len(stats['engines']),
+            len(stats['teams']), len(stats['enginemodels']), len(stats['chassis']), len(stats['nationalities']),
+            len(stats['unique_winners']), len(stats['unique_podiums']), len(stats['unique_poles']), len(stats['unique_fastest']),
+            len(stats['points_scorers']), len(stats['points_scorers'] - prior_sets['points_scorers']), len(stats['unique_winners'] - prior_sets['winners']), len(stats['unique_podiums'] - prior_sets['podiums']),
+            len(stats['unique_poles'] - prior_sets['poles']), len(stats['unique_fastest'] - prior_sets['fastest']), len(stats['unique_sprint_winners']), len(stats['unique_sprint_podiums']),
+            len(stats['unique_sprint_poles']), len(stats['unique_sprint_fastest']), len(stats['sprint_points_scorers']), len(stats['unique_sprint_winners'] - prior_sets['sprint_winners']),
+            len(stats['unique_sprint_podiums'] - prior_sets['sprint_podiums']), len(stats['unique_sprint_poles'] - prior_sets['sprint_poles']), len(stats['unique_sprint_fastest'] - prior_sets['sprint_fastest']), len(stats['sprint_points_scorers'] - prior_sets['sprint_points_scorers']),
+            season
+        ))
+
+        prior_sets['points_scorers'].update(stats['points_scorers'])
+        prior_sets['winners'].update(stats['unique_winners'])
+        prior_sets['podiums'].update(stats['unique_podiums'])
+        prior_sets['poles'].update(stats['unique_poles'])
+        prior_sets['fastest'].update(stats['unique_fastest'])
+        prior_sets['sprint_winners'].update(stats['unique_sprint_winners'])
+        prior_sets['sprint_podiums'].update(stats['unique_sprint_podiums'])
+        prior_sets['sprint_poles'].update(stats['unique_sprint_poles'])
+        prior_sets['sprint_fastest'].update(stats['unique_sprint_fastest'])
+        prior_sets['sprint_points_scorers'].update(stats['sprint_points_scorers'])
+
+print("Seasons stats updated.")
 
 update_laps_led_for_component(cur, "Constructors", "constructorid")
 update_laps_led_for_component(cur, "Engines", "engineid")
