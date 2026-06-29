@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 Barcelona-Catalunya Grand Prix**
+**Last updated: 2026 Austrian Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -1122,16 +1122,15 @@ We are working on adding more features to the database to make it even more comp
 - Along with telemetry, circuit information from FastF1 needs to be added otherwise the telemetry data is irrelavent.
 - Add additional weather data from a weather API or a historical weather API.
 - Add mini-sector data from the `openf1` API.
+- Add the offset (distance between start and finish) metric from StatsF1 in each grand prix page to the database. On initial investigation, this looks to be from the 2003 season.
 - Implement the overtakes endpoint from openf1 or do it from FastF1 itself.
 - Add the team radio mp3 recordings from openf1 to the database.
 - Because the openf1 API has data from 2023 onwards, ingest data from 2018 onwards and use that data to update the database.
 - If possible, scrape FIA's decision documents to get information
-- Add sporting and technical regulation PDFs for as many seasons as possible.
+- Add sporting, technical, financial, and general regulation PDFs for as many seasons as possible.
 - Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py.
 - Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
-- Make `writedb.py` more efficient. Currently a lot of the code is O(n²) and can be optimised.
-- Once we optimise `writedb.py`, we would like to include `asyncio` or `threading` to make it even faster.
-- We would also like to use agentic scraping to scrape multiple websites for race reports.
+- We would also like to use agentic scraping to scrape multiple websites for race reports and other sessions as well.
 - Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
 
 We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
