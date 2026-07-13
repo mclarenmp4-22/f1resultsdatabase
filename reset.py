@@ -355,7 +355,7 @@ cursor.execute('''CREATE TABLE Tyres (
 cursor.execute('''CREATE TABLE Chassis (
     ID INTEGER PRIMARY KEY AUTOINCREMENT,
     ConstructorName TEXT,
-    ChassisName TEXT UNIQUE,
+    ChassisName TEXT,
     EngineMakesUsed TEXT,
     TyresUsed TEXT,
     Designers TEXT,
@@ -392,13 +392,14 @@ cursor.execute('''CREATE TABLE Chassis (
     indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (ConstructorID) REFERENCES Constructors(ID),
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
-    FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
+    FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID),
+    UNIQUE (ConstructorName, ChassisName)
 )''')
 
 cursor.execute('''CREATE TABLE EngineModels (
     ID INTEGER PRIMARY KEY AUTOINCREMENT,
     EngineMake TEXT,
-    EngineModel TEXT UNIQUE,
+    EngineModel TEXT,
     Wins INTEGER DEFAULT 0,
     Podiums INTEGER DEFAULT 0,
     Poles INTEGER DEFAULT 0,
@@ -424,6 +425,7 @@ cursor.execute('''CREATE TABLE EngineModels (
     BestSprintQualifyingPosition INTEGER,
     FirstGrandPrix TEXT,
     LastGrandPrix TEXT,
+    StatsF1Data TEXT,
     EngineMakeID INTEGER,
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
@@ -431,7 +433,8 @@ cursor.execute('''CREATE TABLE EngineModels (
     indy500only BOOLEAN DEFAULT 0,
     FOREIGN KEY (EngineMakeID) REFERENCES Engines(ID),
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
-    FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
+    FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID),
+    UNIQUE (EngineMake, EngineModel)
 )''')
 
 cursor.execute('''CREATE TABLE GrandPrixResults (

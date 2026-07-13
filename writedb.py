@@ -21,9 +21,6 @@ import fastf1
 from deep_translator import DeeplTranslator, GoogleTranslator
 import random # for random pauses to avoid hitting rate limits
 
-# Suppress technical warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-
 conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")
@@ -32,6 +29,16 @@ timezone_finder = TimezoneFinder()
 elevation_cache = {}
 country_cache = {}
 constructors_processed_cache = set()
+
+
+def scrape_new_engine_models(engine_makes):
+    if not engine_makes:
+        return
+    from scrape_engine_models import scrape_pending_engine_models
+
+    conn.commit()
+    scrape_pending_engine_models(engine_makes=set(engine_makes))
+
 
 def parse_coordinate(value):
     match = re.search(r'-?\d+(?:\.\d+)?', str(value).strip())
@@ -5113,7 +5120,7 @@ for season in seasons[index:]:
             if canonical_session_key == 'sprint':
                 sprint_session_slug = openurl
             
-            if not tde['wassessioncancelled']:
+            if not tde['wassessioncancelled'] and s['hasResults']:
                 if 'qualifying' in openurl:
                     grandprixlinks.append({'href': f'https://motorsportstats.com/api/results-classification?sessionSlug={openurl}'}) #remember to parse sprint qualifying also
                 elif 'sprint' in openurl:
@@ -5190,6 +5197,7 @@ for season in seasons[index:]:
             "raceinterval", "penalties", "sprint_penalties",
             "driverid", "teamid", "constructorid", "chassisid", "engineid", "enginemodelid", "tyreid", "grandprixid"
         ]
+        pending_engine_makes = set()
        
         for result in results:
             #print (result['driver'])
@@ -5275,37 +5283,44 @@ for season in seasons[index:]:
             team_id = cur.fetchone()[0]
             cur.execute("SELECT ID FROM Constructors WHERE ConstructorName = ?", (result['constructor'],))
             constructor_id = cur.fetchone()[0]
-            cur.execute("INSERT OR IGNORE INTO Chassis (ConstructorName, ChassisName, ConstructorID, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?,?,?)", (result['constructor'], result['chassis'], constructor_id, gp, grandprix_id))          
-            if cur.rowcount > 0:
-                open_url(f"https://www.statsf1.com/en/{slugify_statsf1_constructor_name(result['constructor'])}-{slugify_statsf1_constructor_name(result['chassis'])}.aspx")
-                engines_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}) else None
-                tyres_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}) else None
-                designers = parse_designers(str(soup))
-                cur.execute("""
-                    SELECT DISTINCT EngineModel
-                    FROM GrandPrixResults
-                    WHERE Constructor = ? AND Chassis = ?
-                """, (result['constructor'], result['chassis']))
-
-                engine_models = [row[0] for row in cur.fetchall()]
-                cur.execute("""
-                    UPDATE Chassis
-                    SET EngineMakesUsed = ?, TyresUsed = ?, Designers = ?, EngineModelsUsed = ?
-                    WHERE ConstructorName = ? AND ChassisName = ?
-                """, (
-                    json.dumps(engines_used) if engines_used else None,
-                    json.dumps(tyres_used) if tyres_used else None,
-                    json.dumps(designers) if designers else None,
-                    json.dumps(engine_models) if engine_models else None,
-                    result['constructor'],
-                    result['chassis']
-                ))                
-            cur.execute("SELECT ID FROM Chassis WHERE ChassisName = ?", (result['chassis'],))
+            cur.execute("""
+                INSERT OR IGNORE INTO Chassis (ConstructorName, ChassisName, ConstructorID, FirstGrandPrix, FirstGrandPrixID)
+                VALUES (?,?,?,?,?)
+            """, (result['constructor'], result['chassis'], constructor_id, gp, grandprix_id))
+            cur.execute("SELECT ID FROM Chassis WHERE ConstructorName = ? AND ChassisName = ?", (result['constructor'], result['chassis']))
             chassis_id = cur.fetchone()[0]
+            open_url(f"https://www.statsf1.com/en/{slugify_statsf1_constructor_name(result['constructor'])}-{slugify_statsf1_constructor_name(result['chassis'])}.aspx")
+            engines_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Moteurs"}) else None
+            tyres_used = soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}).get_text(strip=True).split(",") if soup.find("div", {"id": "ctl00_CPH_Main_P_Pneus"}) else None
+            designers = parse_designers(str(soup))
+            cur.execute("""
+                SELECT DISTINCT EngineModel
+                FROM GrandPrixResults
+                WHERE Constructor = ? AND Chassis = ?
+            """, (result['constructor'], result['chassis']))
+
+            engine_models = [row[0] for row in cur.fetchall()]
+            cur.execute("""
+                UPDATE Chassis
+                SET EngineMakesUsed = ?, TyresUsed = ?, Designers = ?, EngineModelsUsed = ?
+                WHERE ConstructorName = ? AND ChassisName = ?
+            """, (
+                json.dumps(engines_used) if engines_used else None,
+                json.dumps(tyres_used) if tyres_used else None,
+                json.dumps(designers) if designers else None,
+                json.dumps(engine_models) if engine_models else None,
+                result['constructor'],
+                result['chassis']
+            ))
             cur.execute("SELECT ID FROM Engines WHERE EngineName = ?", (result['engine'],))
             engine_id = cur.fetchone()[0]
-            cur.execute("INSERT OR IGNORE INTO EngineModels (EngineMake, EngineModel, EngineMakeID, FirstGrandPrix, FirstGrandPrixID) VALUES (?,?,?,?,?)", (result['engine'], result['enginemodel'], engine_id, gp, grandprix_id))              
-            cur.execute("SELECT ID FROM EngineModels WHERE EngineModel = ?", (result['enginemodel'],))
+            cur.execute("""
+                INSERT OR IGNORE INTO EngineModels (EngineMake, EngineModel, EngineMakeID, FirstGrandPrix, FirstGrandPrixID)
+                VALUES (?,?,?,?,?)
+            """, (result['engine'], result['enginemodel'], engine_id, gp, grandprix_id))
+            if cur.rowcount == 1:
+                pending_engine_makes.add(result['engine'])
+            cur.execute("SELECT ID FROM EngineModels WHERE EngineMake = ? AND EngineModel = ?", (result['engine'], result['enginemodel']))
             engine_model_id = cur.fetchone()[0]
             cur.execute("SELECT ID FROM Tyres WHERE TyreName = ?", (result['tyre'],))
             tyre_id = cur.fetchone()[0]
@@ -5319,9 +5334,9 @@ for season in seasons[index:]:
             driverids[result['driver']] = driver_id
             teamids[result['team']] = team_id
             constructorids[result['constructor']] = constructor_id
-            chassisids[result['chassis']] = chassis_id
+            chassisids[(result['constructor'], result['chassis'])] = chassis_id
             engineids[result['engine']] = engine_id
-            enginemodelids[result['enginemodel']] = engine_model_id
+            enginemodelids[(result['engine'], result['enginemodel'])] = engine_model_id
             tyreids[result['tyre']] = tyre_id
 
             if nationality_id is not None:
@@ -5356,17 +5371,18 @@ for season in seasons[index:]:
                 cur.execute("UPDATE Drivers SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, driver_id)) 
             cur.execute("UPDATE Teams SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, team_id))
             cur.execute("UPDATE Constructors SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, constructor_id))
-            cur.execute("UPDATE Chassis SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ChassisName = ? AND ConstructorID = ?", (gp, grandprix_id, result['chassis'], constructor_id))
+            cur.execute("UPDATE Chassis SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ConstructorName = ? AND ChassisName = ?", (gp, grandprix_id, result['constructor'], result['chassis']))
             cur.execute("UPDATE Engines SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, engine_id))
-            cur.execute("UPDATE EngineModels SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, engine_model_id))
+            cur.execute("UPDATE EngineModels SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE EngineMake = ? AND EngineModel = ?", (gp, grandprix_id, result['engine'], result['enginemodel']))
             cur.execute("UPDATE Tyres SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE ID = ?", (gp, grandprix_id, tyre_id))
             cur.execute("UPDATE Drivers SET needstatsupdate = 1 WHERE ID = ?", (driver_id,))
             cur.execute("UPDATE Teams SET needstatsupdate = 1 WHERE ID = ?", (team_id,))
             cur.execute("UPDATE Constructors SET needstatsupdate = 1 WHERE ID = ?", (constructor_id,))
-            cur.execute("UPDATE Chassis SET needstatsupdate = 1 WHERE ChassisName = ? AND ConstructorID = ?", (result['chassis'], constructor_id))
+            cur.execute("UPDATE Chassis SET needstatsupdate = 1 WHERE ConstructorName = ? AND ChassisName = ?", (result['constructor'], result['chassis']))
             cur.execute("UPDATE Engines SET needstatsupdate = 1 WHERE ID = ?", (engine_id,))
-            cur.execute("UPDATE EngineModels SET needstatsupdate = 1 WHERE ID = ?", (engine_model_id,))
+            cur.execute("UPDATE EngineModels SET needstatsupdate = 1 WHERE EngineMake = ? AND EngineModel = ?", (result['engine'], result['enginemodel']))
             cur.execute("UPDATE Tyres SET needstatsupdate = 1 WHERE ID = ?", (tyre_id,))
+        scrape_new_engine_models(pending_engine_makes)
         print ("Results saved to database")   
         session_lookup = get_race_control_session_lookup(cur, grandprix_id, year)
 
@@ -5891,7 +5907,7 @@ for season in seasons[index:]:
                         driver_id = driverids.get(driver_name)
                         constructor_id = constructorids.get(constructor_name)
                         engine_id = engineids.get(engine_name)
-                        engine_model_id = enginemodelids.get(engine_model_name)
+                        engine_model_id = enginemodelids.get((engine_name, engine_model_name))
                         
                         cur.execute("""
                             INSERT INTO MaxSpeeds (GrandPrixName, Position, Driver, Constructor, Engine, EngineModel, SessionName, TimingPoint, SpeedKph, GrandPrixID, SessionID, DriverID, ConstructorID, EngineID, EngineModelID)
