@@ -2044,6 +2044,7 @@ def parse_race_info(html_content, someelements):
         "circuit_name": standardize_circuit_name_with_year(someelements[3], year),
         "laps": None,
         "circuit_distance": None,
+        "offset": None,
         "weather": None,
         "notes": None
     }
@@ -2075,6 +2076,10 @@ def parse_race_info(html_content, someelements):
         if laps_dist_match:
             race_info["laps"] = int(laps_dist_match.group(1))
             race_info["circuit_distance"] = laps_dist_match.group(2).strip()
+
+        offset_match = re.search(r'Offset:\s*([\d.,\s]+)\s*m', gpinfo_text)
+        if offset_match:
+            race_info["offset"] = float(offset_match.group(1).replace(",", "").replace(" ", ""))
 
     # Extract the weather
     weather_tag = soup.find('div', class_='GPmeteo')
@@ -5049,10 +5054,10 @@ for season in seasons[index:]:
         cur.execute("SELECT ID FROM Circuits WHERE CircuitName = ?", (race_info['circuit_name'],))
         circuitid = cur.fetchone()[0]
         corresponding_circuit_layout = link_circuitlayout(race_info['latitude'], race_info['longitude'], race_info['dateindatetime'])
-        cur.execute("""INSERT INTO GrandsPrix (ID, Season, GrandPrixName, RoundNumber, CircuitName, Country, Date, DateInDateTime, Laps, CircuitLength, Weather, Notes, SprintWeekend, PoleSide, GridFormation, CircuitID, CircuitLayoutID)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        cur.execute("""INSERT INTO GrandsPrix (ID, Season, GrandPrixName, RoundNumber, CircuitName, Country, Date, DateInDateTime, Laps, CircuitLength, Offset, Weather, Notes, SprintWeekend, PoleSide, GridFormation, CircuitID, CircuitLayoutID)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, 
-        (race_info['race_number'], year, gp, grandsprix.index(grandprix) + 1, race_info['circuit_name'], race_info['country'], race_info['date'], race_info['dateindatetime'], race_info['laps'], race_info['circuit_distance'], race_info['weather'], race_info.get('notes'), trigger, poleside, gridformation, circuitid, corresponding_circuit_layout))   
+        (race_info['race_number'], year, gp, grandsprix.index(grandprix) + 1, race_info['circuit_name'], race_info['country'], race_info['date'], race_info['dateindatetime'], race_info['laps'], race_info['circuit_distance'], race_info['offset'], race_info['weather'], race_info.get('notes'), trigger, poleside, gridformation, circuitid, corresponding_circuit_layout))   
         cur.execute("UPDATE Seasons SET needstatsupdate = 1 WHERE Season = ?", (year,))
         cur.execute('UPDATE Circuits SET LastGrandPrix = ?, LastGrandPrixID = ? WHERE CircuitName = ?', (gp, race_info['race_number'], race_info['circuit_name']))
         #add one to grandprixcount in circuits table

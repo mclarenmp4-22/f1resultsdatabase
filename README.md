@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 British Grand Prix**
+**Last updated: 2026 Belgian Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -331,6 +331,8 @@ python deleterace.py <race_name>
    - **DateInDateTime**: Date as datetime. _TEXT_
    - **Laps**: Number of laps the race was held. _INTEGER_
    - **CircuitLength**: The length of the circuit in which the race was held. _TEXT_
+   - **Offset**: Distance between the start line and the finish line, in metres. This is only available after 2003. In some circuits like Monaco, it may be zero as well. _REAL_
+   _**Note**_: The start line here represents the start line of the race, before pole position. The finish line represents the start/finish line (timing loop at the end of the lap). The offset here is the distance between the start line (where the race starts) and the finish line (where the race ends or the start/finish line of the lap).
    - **Weather**: Weather conditions. For example "Sunny", "Overcast", "Cloudy", "Night", "Rain", etc. _TEXT_
    - **Notes**: Notes about the race. _TEXT_
    - **SprintWeekend**: Whether it was a sprint weekend. _BOOLEAN_
@@ -1133,7 +1135,6 @@ We are working on adding more features to the database to make it even more comp
 - Along with telemetry, circuit information from FastF1 needs to be added otherwise the telemetry data is irrelavent.
 - Add additional weather data from a weather API or a historical weather API.
 - Add mini-sector data from the `openf1` API.
-- Add the offset (distance between start and finish) metric from StatsF1 in each grand prix page to the database. On initial investigation, this looks to be from the 2003 season.
 - Implement the overtakes endpoint from openf1 or do it from FastF1 itself.
 - Add the team radio mp3 recordings from openf1 to the database.
 - Because the openf1 API has data from 2023 onwards, ingest data from 2018 onwards and use that data to update the database.
@@ -1141,8 +1142,9 @@ We are working on adding more features to the database to make it even more comp
 - Add sporting, technical, financial, and general regulation PDFs for as many seasons as possible.
 - Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py.
 - Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
-- We would also like to use agentic scraping to scrape multiple websites for race reports and other sessions as well.
-- It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database.
+- We would also like to use agentic scraping to scrape multiple websites for race reports and other sessions as well. Every single detail should be there in the race report.
+- It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. There is also some data about practice sessions which are now merged (4 practice sessions into two). This data also exists in this website: https://www.newsonf1.com/
+- Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/)
 - Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
 
 We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.

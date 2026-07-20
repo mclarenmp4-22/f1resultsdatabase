@@ -137,6 +137,7 @@ cursor.execute('''CREATE TABLE GrandsPrix (
     PoleSide TEXT,
     GridFormation TEXT,
     CircuitLength TEXT,
+    Offset REAL,
     Weather TEXT,
     Notes TEXT,
     SprintWeekend BOOLEAN,
