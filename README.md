@@ -683,7 +683,16 @@ python deleterace.py <race_name>
 
     We also have data for practice sessions. This must not be confused with qualifying being called practice previously. There were up to four practice sessions in previous years, with the pre-race warm ups as well. There have been only two practice sessions in some years, and in Sprint weekends we only have one. We currently have three practice sessions in normal weekends.
 
-    We have data for Q1 and Q2 only after 1983. To find drivers who did not pre-qualify or qualify, it is there in overall qualifying. We have data for the Sunday morning warm-up session from 1984 till 2003, when the session no longer happened. 
+    From 2000 to 2003, a Grand Prix weekend had four practice sessions: two on Friday and two on Saturday. These are stored separately in the `fridaypractice1`, `fridaypractice2`, `saturdaypractice1`, and `saturdaypractice2` columns, which are scraped from newsonf1.com. They are independent of the `practice1` to `practice4` columns, which come from Formula1.com and, for this era, hold only a partial and inconsistent subset of those same four sessions. **The two sets of columns must not be conflated or assumed to correspond**; the Friday/Saturday columns are the ones that state which session a time actually came from.
+
+    2003 is an exception: Formula 1 moved to single-lap knockout qualifying that season, and the second Friday session became Friday Qualifying rather than a practice session. There is therefore no Friday Practice 2 in 2003, and `fridaypractice2` is `NULL` for every race of that season. The 2003 Belgian Grand Prix was cancelled and so has no data at all.
+
+    Monaco is the other exception: its first two practice sessions were held on Thursday rather than Friday, so they are stored in `thursdaypractice1` and `thursdaypractice2`. Those columns are `NULL` for every other Grand Prix, and both `fridaypractice` columns are `NULL` for Monaco. Every race, Monaco included, has both Saturday sessions.
+
+    The source publishes only position, driver, team, and best lap for these sessions, so there is no laps-completed count and the Friday/Saturday practice columns have no `laps` equivalent. Times set in wet conditions are recorded as ordinary times, since there is no per-session conditions field. Not every entrant appears in every session, so a driver who did not run will have `NULL`s for that session.
+
+    We have data for the two qualifying sessions on Friday and Saturday in the old format, Q1 and Q2 only after 1983. To find drivers who did not pre-qualify or qualify, it is there in overall qualifying. We have data for the Sunday morning warm-up session from 1984 till 2003, when the session no longer happened. 
+
 
     In 2021, the Qualifying session set the grid for the Sprint race, and the Sprint set the grid for the Grand Prix, with the top 3 finishers getting 3, 2, and 1 point respectively.
 
@@ -798,6 +807,38 @@ python deleterace.py <race_name>
     - **practice4timeinseconds**: Practice 4 time in seconds. _REAL_
     - **practice4interval**: Gap to the car ahead in Practice 4. _REAL_
     - **practice4laps**: Practice 4 laps. _INTEGER_
+
+    The following columns cover the four practice sessions of the 2000-2003 era, two on the first day of running and two on Saturday, and are sourced from newsonf1.com independently of `practice1` to `practice4` above. See the notes at the start of this table. There is no `laps` column for these sessions because the source does not publish a lap count.
+    - **thursdaypractice1position**: Thursday Practice 1 position. Only used for Monaco, which practised on Thursday. `NULL` everywhere else. _INTEGER_
+    - **thursdaypractice1time**: Thursday Practice 1 best lap. _TEXT_
+    - **thursdaypractice1gap**: Thursday Practice 1 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **thursdaypractice1interval**: Gap to the car ahead in Thursday Practice 1. _REAL_
+    - **thursdaypractice1timeinseconds**: Thursday Practice 1 best lap in seconds. _REAL_
+    - **thursdaypractice2position**: Thursday Practice 2 position. Only used for Monaco. `NULL` everywhere else. _INTEGER_
+    - **thursdaypractice2time**: Thursday Practice 2 best lap. _TEXT_
+    - **thursdaypractice2gap**: Thursday Practice 2 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **thursdaypractice2interval**: Gap to the car ahead in Thursday Practice 2. _REAL_
+    - **thursdaypractice2timeinseconds**: Thursday Practice 2 best lap in seconds. _REAL_
+    - **fridaypractice1position**: Friday Practice 1 position. `NULL` at Monaco, which practised on Thursday. _INTEGER_
+    - **fridaypractice1time**: Friday Practice 1 best lap. _TEXT_
+    - **fridaypractice1gap**: Friday Practice 1 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **fridaypractice1interval**: Gap to the car ahead in Friday Practice 1. _REAL_
+    - **fridaypractice1timeinseconds**: Friday Practice 1 best lap in seconds. _REAL_
+    - **fridaypractice2position**: Friday Practice 2 position. Always `NULL` in 2003, when this session was Friday Qualifying instead. _INTEGER_
+    - **fridaypractice2time**: Friday Practice 2 best lap. _TEXT_
+    - **fridaypractice2gap**: Friday Practice 2 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **fridaypractice2interval**: Gap to the car ahead in Friday Practice 2. _REAL_
+    - **fridaypractice2timeinseconds**: Friday Practice 2 best lap in seconds. _REAL_
+    - **saturdaypractice1position**: Saturday Practice 1 position. _INTEGER_
+    - **saturdaypractice1time**: Saturday Practice 1 best lap. _TEXT_
+    - **saturdaypractice1gap**: Saturday Practice 1 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **saturdaypractice1interval**: Gap to the car ahead in Saturday Practice 1. _REAL_
+    - **saturdaypractice1timeinseconds**: Saturday Practice 1 best lap in seconds. _REAL_
+    - **saturdaypractice2position**: Saturday Practice 2 position. _INTEGER_
+    - **saturdaypractice2time**: Saturday Practice 2 best lap. _TEXT_
+    - **saturdaypractice2gap**: Saturday Practice 2 gap to the session leader. `NULL` for the leader. _TEXT_
+    - **saturdaypractice2interval**: Gap to the car ahead in Saturday Practice 2. _REAL_
+    - **saturdaypractice2timeinseconds**: Saturday Practice 2 best lap in seconds. _REAL_
     - **sprintposition**: Sprint position. _INTEGER_
     - **sprintlaps**: Sprint laps. _INTEGER_
     - **sprinttime**: Sprint time. _TEXT_
@@ -1143,7 +1184,7 @@ We are working on adding more features to the database to make it even more comp
 - Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py.
 - Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
 - We would also like to use agentic scraping to scrape multiple websites for race reports and other sessions as well. Every single detail should be there in the race report.
-- It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. There is also some data about practice sessions which are now merged (4 practice sessions into two). This data also exists in this website: https://www.newsonf1.com/
+- It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. 
 - Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/)
 - Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
 

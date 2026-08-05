@@ -40,6 +40,25 @@ def scrape_new_engine_models(engine_makes):
     scrape_pending_engine_models(engine_makes=set(engine_makes))
 
 
+def scrape_historical_practice(year, gp):
+    """
+    Fills the Thursday/Friday/Saturday practice columns for the 2000-2003 era
+    from newsonf1.com. Those seasons ran four practice sessions, two on each
+    day, which the practice1-4 columns do not capture. (Monaco practised on
+    Thursday rather than Friday.)
+
+    A normal run resumes forward from the latest season and never reaches these
+    years; this fires on a from-scratch rebuild, keeping one in step with a
+    database that has already been backfilled by running that module directly.
+    """
+    if not 2000 <= year <= 2003:
+        return
+    from scrape_historical_practice import scrape_historical_practice_sessions
+
+    conn.commit()
+    scrape_historical_practice_sessions(years={year}, grandprix_names=[gp])
+
+
 def parse_coordinate(value):
     match = re.search(r'-?\d+(?:\.\d+)?', str(value).strip())
     if not match:
@@ -5388,7 +5407,8 @@ for season in seasons[index:]:
             cur.execute("UPDATE EngineModels SET needstatsupdate = 1 WHERE EngineMake = ? AND EngineModel = ?", (result['engine'], result['enginemodel']))
             cur.execute("UPDATE Tyres SET needstatsupdate = 1 WHERE ID = ?", (tyre_id,))
         scrape_new_engine_models(pending_engine_makes)
-        print ("Results saved to database")   
+        scrape_historical_practice(year, gp)
+        print ("Results saved to database")
         session_lookup = get_race_control_session_lookup(cur, grandprix_id, year)
 
         for drivername in drivernames:
