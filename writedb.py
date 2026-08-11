@@ -21,6 +21,29 @@ import fastf1
 from deep_translator import DeeplTranslator, GoogleTranslator
 import random # for random pauses to avoid hitting rate limits
 
+import datetime
+import sqlite3
+
+# 1. Convert Python datetime objects to ISO strings when saving to SQLite
+def adapt_datetime(dt):
+    return dt.isoformat()
+
+# 2. Convert SQLite text strings back to Python datetime objects when reading
+def convert_datetime(val):
+    # Decode SQLite bytes back to string
+    date_str = val.decode("utf-8").strip()
+    
+    # Fallback: if it's only a date (10 chars), append midnight time
+    if len(date_str) == 10:
+        date_str += " 00:00:00"
+        
+    return datetime.datetime.fromisoformat(date_str)
+
+# 3. Register the custom functions
+sqlite3.register_adapter(datetime.datetime, adapt_datetime)
+sqlite3.register_converter("datetime", convert_datetime)
+sqlite3.register_converter("timestamp", convert_datetime)
+
 conn = sqlite3.connect('sessionresults.db')
 cur = conn.cursor()
 #cur.execute("PRAGMA foreign_keys = ON")

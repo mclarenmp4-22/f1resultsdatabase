@@ -3,3 +3,5 @@ sessionresults.db
 compress_db.py
 /__pycache__/
 .vscode
+.agents
+.claude

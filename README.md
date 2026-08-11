@@ -22,10 +22,6 @@ Or, you can do some cool data analysis with all this data.
 
 ---
 
-#### Note:
-This database has every single Grand Prix part of the _World Championship_. It does not contain non-Championship Grands Prix. When the word "Grand Prix" is used here, it refers to a World Championship Grand Prix. Similarly, when the word "Formula One", "F1", "Formula 1", or any of its variants have been used here, it refers to the _World Championship_, even though the 1952 and 1953 seasons were run to F2 regulations. The terms "Formula One", "Grand Prix", and "World Championship" are used synonymously.
-
-Formula 1 and related trademarks are the property of their respective owners. 
 
 This is the most comprehensive F1 database with:
 - **Every World Championship Grand Prix** result since 1950.
@@ -38,6 +34,51 @@ This is the most comprehensive F1 database with:
 - **Comprehensive Penalties**: A full database of penalties with official reasons and serving types.
 - **In-Season Progress**: Track the championship standings race-by-race.
 - **Race Reports**: Narrative reports for every Grand Prix, from Wikipedia.
+
+---
+#### Note:
+This database has every single Grand Prix part of the _World Championship_. It does not contain non-Championship Grands Prix. When the word "Grand Prix" is used here, it refers to a World Championship Grand Prix. Similarly, when the word "Formula One", "F1", "Formula 1", or any of its variants have been used here, it refers to the _World Championship_, even though the 1952 and 1953 seasons were run to F2 regulations. The terms "Formula One", "Grand Prix", and "World Championship" are used synonymously.
+
+## Table of Contents
+- [Requirements](#requirements)
+- [Download the latest version](#download-the-latest-version)
+- [Update the database](#update-the-database)
+- [Update race reports only](#update-race-reports-only)
+- [Reset/initialise the database](#resetinitialise-the-database)
+- [Delete a specific season](#delete-a-specific-season)
+- [Delete a specific race](#delete-a-specific-race)
+- [Tables](#tables)
+  1. [Seasons](#1-seasons)
+  2. [Circuits](#2-circuits)
+  3. [CircuitLayouts](#3-circuitlayouts)
+  4. [GrandsPrix](#4-grandsprix)
+  5. [Sessions](#5-sessions)
+  6. [Drivers](#6-drivers)
+  7. [Teams](#7-teams)
+  8. [Constructors](#8-constructors)
+  9. [Engines](#9-engines)
+  10. [Tyres](#10-tyres)
+  11. [Chassis](#11-chassis)
+  12. [EngineModels](#12-enginemodels)
+  13. [GrandPrixResults](#13-grandprixresults)
+  14. [PitStopSummary](#14-pitstopsummary)
+  15. [LapByLap](#15-lapbylap)
+  16. [DriversChampionship](#16-driverschampionship)
+  17. [ConstructorsChampionship](#17-constructorschampionship)
+  18. [InSeasonProgressDrivers](#18-inseasonprogressdrivers)
+  19. [InSeasonProgressConstructors](#19-inseasonprogressconstructors)
+  20. [Nationalities](#20-nationalities)
+  21. [RaceReports](#21-racereports)
+  22. [MaxSpeeds](#22-maxspeeds)
+  23. [RaceControlMessages](#23-racecontrolmessages)
+  24. [WeatherData](#24-weatherdata)
+  25. [FamilyRelations](#25-familyrelations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Licensing & Legal Terms](#-licensing--legal-terms)
+- [Disclaimer & Limitation of Liability](#-disclaimer--limitation-of-liability)
+
+---
 
 
 ## Requirements:
@@ -1170,34 +1211,36 @@ This table contains family relationships between drivers in Formula 1 history. E
 
 
 ## Roadmap:
-We are working on adding more features to the database to make it even more comprehensive. Some of the features and/or changes we want to add in the future include:
-- Add robust OCR detection for the circuit layouts. Currently, my attempt of the OCR detection is not very accurate as it includes false positives, false negatives, and incorrect detection. Once a robust OCR detection is added, we can add corner names and numbers to the circuit layout SVGs.
-- Check the viability of adding telemetry data and add if viable, including mini-sectors. Telemetry data can be added in a parquet file to reduce file size and bloating of the database.
-- Along with telemetry, circuit information from FastF1 needs to be added otherwise the telemetry data is irrelavent.
-- Add additional weather data from a weather API or a historical weather API.
-- Add mini-sector data from the `openf1` API.
-- Implement the overtakes endpoint from openf1 or do it from FastF1 itself.
-- Add the team radio mp3 recordings from openf1 to the database.
-- Because the openf1 API has data from 2023 onwards, ingest data from 2018 onwards and use that data to update the database.
-- If possible, scrape FIA's decision documents to get information
-- Add sporting, technical, financial, and general regulation PDFs for as many seasons as possible.
-- Migration for lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py.
-- Add more information to the Sessions table, to include all sessions that we go through, such as warm-up sessions and pre-qualifying sessions.
-- We would also like to use agentic scraping to scrape multiple websites for race reports and other sessions as well. Every single detail should be there in the race report.
-- It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. 
-- Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/)
-- Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
-
-We would like to add more data for your database. If you have any suggestions, please open an issue, or submit a pull request.
+Please check our [roadmap](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/ROADMAP.md) for the next steps.
 
 ## Contributing
-Contributions are welcome! If you find any data inaccuracies or want to suggest new features:
-1. Fork the repository.
-2. Create a new branch for your changes. Do not work on the main branch!
-3. Submit a Pull Request with a detailed description of your updates.
-4. Ensure any schema changes are also updated in `reset.py` and in the README.
+Please check the [contributing guide](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CONTRIBUTING.md) for how to contribute to the project.
 
-Even if you don't have any code to contribute, you can still help by suggesting new features or contributing to the Wikipedia pages of race reports. Currently, a lot of pages of the race reports don't have enough data showing what happened. You can change that by editing and contributing to the Wikipedia pages of race reports. This helps both the F1 community as well as this database.
+---
 
-For major changes, please open an issue first to discuss what you would like to change. Anything that can make this database more comprehensive helps!
+## ⚖️ Licensing & Legal Terms
 
+This project uses a split-licensing model to ensure that both the scraper application and the compiled historical data remain open, public, and accessible to everyone forever.
+
+* **Scraper Code:** Licensed under the **GNU General Public License v3 (GPLv3)**. Any modified versions of this code must also be made open-source under the same license. See [LICENSE.txt](https://github.com/f1database/f1database/blob/main/LICENSE.txt) for details.
+* **F1 Database/Datasets:** Licensed under the **Open Database License (ODbL) v1.0**. You are free to share, modify, and use the database. However, any altered or derivative versions of this database must also be released under the ODbL to keep the facts open-source. See [DATA-LICENCE.txt](https://github.com/f1database/f1database/blob/main/DATA-LICENCE.txt) for details.
+
+---
+
+### 🛑 Disclaimer & Limitation of Liability
+
+#### 1. No Affiliation
+This project is an independent, community-driven historical archive. It is entirely unofficial and is not affiliated with, endorsed by, sponsored by, or associated in any way with the Formula One group of companies, the Fédération Internationale de l'Automobile (FIA), or any specific racing team or driver. All product and company names, logos, or trademarks are the property of their respective owners.
+
+#### 2. Educational & Historical Purpose Only
+The code and datasets in this repository are provided strictly for educational, research, and personal historical analysis purposes. This data may be used for commercial purposes at your own risk.
+
+#### 3. Absolute Liability Waiver
+THE SOFTWARE AND DATA ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. 
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE, THE DATA, THE USE OF THE SOFTWARE, OR ANY OTHER DEALINGS IN THE SOFTWARE.
+
+#### 4. Scraping Accountability
+Users are entirely responsible for their own compliance with local laws, rate limits, and the Terms of Service of any external website targeted by this scraper. The creator of this repository assumes no responsibility or liability for IP bans, server disruptions, or legal actions resulting from the execution of this code by third parties.
+
+---
