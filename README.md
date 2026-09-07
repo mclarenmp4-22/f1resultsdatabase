@@ -47,6 +47,7 @@ This database has every single Grand Prix part of the _World Championship_. It d
 - [Reset/initialise the database](#resetinitialise-the-database)
 - [Delete a specific season](#delete-a-specific-season)
 - [Delete a specific race](#delete-a-specific-race)
+- [Update a specific race](#update-a-specific-race)
 - [Tables](#tables)
   1. [Seasons](#1-seasons)
   2. [Circuits](#2-circuits)
@@ -75,6 +76,7 @@ This database has every single Grand Prix part of the _World Championship_. It d
   25. [FamilyRelations](#25-familyrelations)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
+- [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md)
 - [Licensing & Legal Terms](#-licensing--legal-terms)
 - [Disclaimer & Limitation of Liability](#-disclaimer--limitation-of-liability)
 
@@ -90,7 +92,7 @@ pip install -r requirements.txt
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
 
-**Last updated: 2026 Hungarian Grand Prix**
+**Last updated: 2026 Italian Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:
@@ -150,23 +152,46 @@ Race names are matched case-insensitively. This command updates only the `RaceRe
 ## Reset/initialise the database:
 If, for whatever reason, you want to wipe out all the data in the database or you want to create the database with all the tables and columns, run this command:
 ```bash
-python reset.py
+python updaters/reset.py
 ```
 
 ## Delete a specific season:
 If you want to delete data for a single season (e.g. to re-scrape it), run:
 ```bash
-python deleteseason.py <year>
+python updaters/deleteseason.py <year>
 ```
 This will remove all races, results, and standings for that year while keeping the rest of the database intact.
 
 ## Delete a specific race:
 If you want to delete data for a single race (e.g. to re-scrape it), run:
 ```bash
-python deleterace.py <race_name>
+python updaters/deleterace.py <race_name>
 ```
 
 #### Note: This is meant to be a debugging tool only to fix bugs and does not delete all tables containing data for that specific season or Grand Prix. 
+
+## Update a specific race:
+Results change after the chequered flag: post-race penalties, disqualifications, appeals, or StatsF1 correcting its data. `writedb.py` only scrapes Grands Prix newer than the last one in the database, so to re-sync an older race with StatsF1 run:
+```bash
+python updaters/updaterace.py "2026 Monaco Grand Prix"
+```
+This re-scrapes the race (and the sprint, on a sprint weekend) of that one Grand Prix and rewrites:
+- `GrandPrixResults`: classification, fastest laps and penalties columns.
+- `GrandsPrix`: `RaceResultNotes` and `SprintNotes`.
+- `InSeasonProgressDrivers` and `InSeasonProgressConstructors`: for that Grand Prix and every later Grand Prix of the season already in the database.
+- `DriversChampionship` and `ConstructorsChampionship`: for the season.
+- Derived statistics (`Drivers`, `Constructors`, `Seasons`, ...) by running `updaters/update_stats_alone.py` afterwards.
+
+The standings are not scraped. For every season in which all scores count (1991 onwards) the points that changed are applied to the standings as deltas, positions are re-ranked (tied drivers share a position in the in-season tables; the championship tables break ties on points and then countback of race finishing positions, as StatsF1 does) and the championship's mathematical locks are re-applied. Historical deductions and exclusions stored from StatsF1 are left untouched. Seasons with dropped scores or top-car-only constructor points (1950 to 1990) are re-scraped from StatsF1 instead.
+
+Every change is printed as `column: old -> new`, and everything is written in one transaction, so a failure part-way through writes nothing. Race names are matched case-insensitively.
+
+Options:
+- `--dry-run` scrapes and prints every change but writes nothing.
+- `--skip-stats` skips the statistics recomputation; the affected entities stay flagged with `needstatsupdate = 1` and are picked up by the next `writedb.py` run.
+- `--results-only` rewrites only `GrandPrixResults` and `GrandsPrix`. Use it only when the change cannot affect points, for example a corrected retirement reason.
+
+Lap-by-lap data, pit stops, sessions and the race report are not touched, as they do not change when a result is reclassified. Refresh the race report with `python writedb.py --updateracereport "2026 Monaco Grand Prix"`.
 
 
 ## Tables
@@ -355,6 +380,9 @@ python deleterace.py <race_name>
    ```["19851103", "19861026", "19871115", "19881113", "19891105", "19901104", "19911103", "19921108", "19931107", "19941113", "19951112"]``` _TEXT_
    - **SVG**: SVG path data for the track layout. _TEXT_
    - **CircuitChanges**: Description of changes from the previous version of that circuit. _TEXT_
+   - **TrackDirection**: Direction the circuit is raced in, read from the directional arrow(s) on the layout image: `Clockwise`, `Anticlockwise`, or `Both`. A layout image carries a second arrow only when the circuit was raced in both directions, and the two arrows always oppose one another, so two arrows means `Both`. NULL where no arrow could be located. Suzuka races in a unique figure-of-eight configuration (partly clockwise and partly anticlockwise). That is stored as `Figure of eight`. _TEXT_
+   - **OfficialCircuitName**: The official full name of the circuit as listed by StatsF1, e.g. `Adelaide Street Circuit`. _TEXT_
+   - **TrackType**: The type of the circuit venue: `Street Circuit`, `Semi-permanent Circuit`, or `Permanent Circuit`. _TEXT_
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
@@ -1215,6 +1243,8 @@ Please check our [roadmap](https://github.com/mclarenmp4-22/f1resultsdatabase/bl
 
 ## Contributing
 Please check the [contributing guide](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CONTRIBUTING.md) for how to contribute to the project.
+
+This project is governed by our [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md). By participating, you are expected to uphold it.
 
 ---
 

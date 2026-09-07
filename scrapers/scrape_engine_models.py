@@ -874,7 +874,7 @@ def scrape_pending_engine_models(
 # ---------------------------------------------------------------------------
 
 def main():
-    con = sqlite3.connect("sessionresults.db")
+    con = sqlite3.connect("../sessionresults.db")
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 

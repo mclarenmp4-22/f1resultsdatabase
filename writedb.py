@@ -10,21 +10,21 @@ import json
 import sys
 import unicodedata
 from decimal import Decimal
-from collections import defaultdict, Counter
+from collections import defaultdict
 import cv2
 import numpy as np
 import pandas as pd
-import warnings
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 import fastf1
-from deep_translator import DeeplTranslator, GoogleTranslator
+from deep_translator import GoogleTranslator
 import random # for random pauses to avoid hitting rate limits
-
+from ollama import chat
 import datetime
 import sqlite3
+from scrapers.circuit_layout_scraper import generate_track_svg, parse_circuit_metadata
 
-# 1. Convert Python datetime objects to ISO strings when saving to SQLite
+# 1. Convert Python date/time objects to ISO strings when saving to SQLite
 def adapt_datetime(dt):
     return dt.isoformat()
 
@@ -40,6 +40,7 @@ def convert_datetime(val):
     return datetime.datetime.fromisoformat(date_str)
 
 # 3. Register the custom functions
+sqlite3.register_adapter(datetime.date, adapt_datetime)
 sqlite3.register_adapter(datetime.datetime, adapt_datetime)
 sqlite3.register_converter("datetime", convert_datetime)
 sqlite3.register_converter("timestamp", convert_datetime)
@@ -57,7 +58,7 @@ constructors_processed_cache = set()
 def scrape_new_engine_models(engine_makes):
     if not engine_makes:
         return
-    from scrape_engine_models import scrape_pending_engine_models
+    from scrapers.scrape_engine_models import scrape_pending_engine_models
 
     conn.commit()
     scrape_pending_engine_models(engine_makes=set(engine_makes))
@@ -76,7 +77,7 @@ def scrape_historical_practice(year, gp):
     """
     if not 2000 <= year <= 2003:
         return
-    from scrape_historical_practice import scrape_historical_practice_sessions
+    from scrapers.scrape_historical_practice import scrape_historical_practice_sessions
 
     conn.commit()
     scrape_historical_practice_sessions(years={year}, grandprix_names=[gp])
@@ -302,19 +303,27 @@ headers = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/151.0.7922.138 Safari/537.36"
     )
 }
 
-def open_url(url, retries=3):
+#This is the shared fetcher every request goes through. It returns the raw response so
+#both the HTML scraping (open_url) and the track map images (imread_from_url) get the
+#same Chrome TLS fingerprint, the same retry/backoff, and — most importantly — the same
+#throttle. Images used to bypass all of this on plain urllib, which meant a circuit page
+#with five layouts fired five unthrottled requests back to back and got the connection reset.
+def fetch_url(url, retries=3, extra_headers=None):
     url = "https://" + url.replace("https://", "").replace("//", "/")
+    request_headers = dict(headers)
+    if extra_headers:
+        request_headers.update(extra_headers)
     last_exception = None
 
     for attempt in range(retries):
         try:
             response = requests.get(
                 url,
-                headers=headers,
+                headers=request_headers,
                 impersonate="chrome",
                 timeout=30
             )
@@ -329,9 +338,7 @@ def open_url(url, retries=3):
             response.raise_for_status()
             if "statsf1.com" in url:
                 time.sleep(random.uniform(4, 15))
-            global soup
-            soup = BeautifulSoup(response.content, "html.parser")
-            return soup
+            return response
         except Exception as e:
             last_exception = e
             print(f"Attempt {attempt + 1} failed for URL {url}: {e}")
@@ -346,6 +353,12 @@ def open_url(url, retries=3):
     raise RuntimeError(
         f"Failed to open URL {url} after {retries} attempts."
     ) from last_exception
+
+def open_url(url, retries=3):
+    response = fetch_url(url, retries=retries)
+    global soup
+    soup = BeautifulSoup(response.content, "html.parser")
+    return soup
 
 #This is the function we use to open json files. We use this when we scrape APIs
 def open_json(url):
@@ -800,196 +813,6 @@ def save_weather_data(cursor, year, round_number, grandprix_name, grandprix_id):
 
         print(f"Weather data saved for {grandprix_name} {matched_session['name']}")
 
-#This is the function to download an image from a url and read it into a cv2 image. We use this to read the track maps when we generate the svg files for the track maps.
-def imread_from_url(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Referer': 'https://www.statsf1.com/'
-    }
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as resp:
-        image_bytes = resp.read()
-
-    image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-    img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-    return img, image_bytes
-
-#This is the function to find the closest point on a contour to a given point. We use this to find the closest point on the track outline to the start/finish line when we generate the svg files for the track maps.
-def closest_point_on_contours(contours, point):
-    px, py = point
-    min_dist = float("inf")
-    closest = None
-    closest_cnt = None
-    idx = 0
-
-    for cnt in contours:
-        for i, p in enumerate(cnt):
-            x, y = p[0]
-            d = (x - px) ** 2 + (y - py) ** 2
-            if d < min_dist:
-                min_dist = d
-                closest = (x, y)
-                closest_cnt = cnt
-                idx = i
-
-    return closest, closest_cnt, idx
-
-#This is the function to generate the svg file for the track map. We use this to generate the svg files for the track maps. 
-# We use the track outline and the start/finish line to generate the svg file. 
-# We also use the distance transform of the track mask to find the width of the track at each point, and we use this to generate a more accurate svg file.
-def generate_track_svg(image_path):
-    if image_path == "https://www.statsf1.com/images/GetImage.ashx?id=piste.avus":
-        return """
-            <svg width="1020" height="500" viewBox="0 0 1020 454" xmlns="http://www.w3.org/2000/svg" style="background: #111;">
-            <polyline points="738,11 738,32 766,32 770,36 769,37 768,37 767,38 766,38 765,39 764,39 763,40 761,40 760,41 759,41 758,42 757,42 756,43 754,43 753,44 752,44 751,45 750,45 749,46 748,46 747,47 745,47 744,48 743,48 742,49 741,49 740,50 739,50 738,51 736,51 735,52 734,52 733,53 732,53 731,54 729,54 728,55 727,55 726,56 725,56 724,57 722,57 721,58 720,58 719,59 718,59 717,60 716,60 715,61 713,61 712,62 711,62 710,63 709,63 708,64 707,64 706,65 704,65 703,66 702,66 701,67 699,67 698,68 697,68 696,69 695,69 694,70 693,70 692,71 690,71 689,72 688,72 687,73 686,73 685,74 683,74 682,75 681,75 680,76 679,76 678,77 677,77 676,78 674,78 673,79 672,79 671,80 670,80 669,81 667,81 666,82 665,82 664,83 663,83 662,84 660,84 659,85 658,85 657,86 656,86 655,87 654,87 653,88 651,88 650,89 649,89 648,90 647,90 646,91 644,91 643,92 642,92 641,93 640,93 639,94 637,94 636,95 635,95 634,96 633,96 632,97 631,97 630,98 628,98 627,99 626,99 625,100 624,100 623,101 621,101 620,102 619,102 618,103 616,103 615,104 614,104 613,105 612,105 611,106 610,106 609,107 607,107 606,108 605,108 604,109 603,109 602,110 601,110 600,111 598,111 597,112 596,112 595,113 594,113 593,114 591,114 590,115 589,115 588,116 587,116 586,117 584,117 583,118 582,118 581,119 580,119 579,120 578,120 577,121 575,121 574,122 573,122 572,123 570,123 568,125 566,125 565,126 564,126 563,127 561,127 560,128 559,128 558,129 557,129 556,130 554,130 553,131 552,131 551,132 550,132 549,133 548,133 547,134 546,134 545,135 543,135 542,136 540,136 539,137 538,137 537,138 536,138 535,139 534,139 533,140 531,140 530,141 529,141 528,142 527,142 526,143 525,143 524,144 522,144 521,145 520,145 519,146 518,146 517,147 515,147 514,148 513,148 512,149 511,149 510,150 509,150 508,151 506,151 505,152 504,152 503,153 502,153 501,154 499,154 498,155 497,155 496,156 495,156 494,157 492,157 491,158 490,158 489,159 488,159 487,160 486,160 485,161 483,161 482,162 481,162 480,163 479,163 478,164 476,164 475,165 474,165 473,166 472,166 471,167 469,167 468,168 467,168 466,169 465,169 464,170 463,170 462,171 460,171 459,172 458,172 457,173 456,173 455,174 454,174 453,175 451,175 450,176 449,176 448,177 447,177 446,178 444,178 443,179 442,179 441,180 440,180 439,181 438,181 437,182 435,182 434,183 433,183 432,184 431,184 430,185 429,185 428,186 426,186 425,187 424,187 423,188 422,188 421,189 419,189 418,190 417,190 416,191 415,191 414,192 413,192 412,193 410,193 409,194 408,194 407,195 406,195 405,196 404,196 403,197 402,197 401,198 399,198 398,199 397,199 396,200 395,200 394,201 392,201 391,202 390,202 389,203 388,203 387,204 385,204 384,205 383,205 382,206 381,206 380,207 379,207 378,208 377,208 376,209 374,209 373,210 372,210 371,211 369,211 368,212 367,212 366,213 365,213 364,214 363,214 362,215 361,215 360,216 358,216 357,217 356,217 355,218 354,218 353,219 351,219 350,220 349,220 348,221 347,221 346,222 345,222 344,223 342,223 341,224 340,224 339,225 338,225 337,226 335,226 334,227 333,227 332,228 331,228 330,229 329,229 328,230 327,230 326,231 324,231 323,232 322,232 321,233 320,233 319,234 318,234 317,235 315,235 314,236 313,236 312,237 311,237 310,238 308,238 307,239 306,239 305,240 304,240 303,241 302,241 301,242 299,242 298,243 297,243 296,244 295,244 294,245 293,245 292,246 290,246 289,247 288,247 287,248 286,248 285,249 284,249 283,250 281,250 280,251 279,251 278,252 277,252 276,253 275,253 274,254 272,254 271,255 270,255 269,256 268,256 267,257 266,257 265,258 263,258 262,259 261,259 260,260 259,260 258,261 256,261 255,262 254,262 253,263 252,263 251,264 250,264 249,265 247,265 246,266 245,266 244,267 243,267 242,268 241,268 240,269 238,269 237,270 236,270 235,271 234,271 233,272 231,272 230,273 229,273 228,274 227,274 226,275 225,275 224,276 223,276 222,277 220,277 219,278 218,278 217,279 216,279 215,280 214,280 213,281 212,281 211,282 210,282 209,283 208,283 207,284 206,284 205,285 204,285 203,286 202,286 201,287 200,287 199,288 198,288 197,289 196,289 195,290 194,290 193,291 192,291 191,292 189,292 188,293 187,293 186,294 185,294 184,295 183,295 182,296 181,296 180,297 179,297 178,298 177,298 176,299 175,299 174,300 173,300 172,301 171,301 170,302 169,302 168,303 167,303 166,304 165,304 164,305 163,305 162,306 161,306 160,307 159,307 158,308 157,308 156,309 154,309 153,310 152,310 151,311 150,311 149,312 148,312 147,313 146,313 145,314 144,314 143,315 142,315 141,316 140,316 139,317 138,317 137,318 136,318 135,319 134,319 133,320 132,320 131,321 130,321 129,322 128,322 127,323 126,323 125,324 123,324 122,325 121,325 120,326 119,326 118,327 117,327 116,328 115,328 114,329 113,329 112,330 111,330 110,331 109,331 108,332 107,332 106,333 105,333 104,334 103,334 102,335 101,335 100,336 99,336 98,337 97,337 96,338 95,338 94,339 93,339 92,340 91,340 90,341 89,341 88,342 87,342 86,343 84,343 83,344 82,344 81,345 80,345 79,346 78,346 77,347 76,347 75,348 74,348 73,349 72,349 71,350 70,350 69,351 68,351 67,352 66,352 65,353 64,353 63,354 62,354 61,355 60,355 59,356 58,356 57,357 55,357 54,358 53,358 52,359 50,359 49,360 47,360 46,361 44,361 43,362 41,362 40,363 37,363 36,364 34,364 33,365 32,365 31,366 29,366 28,367 26,367 24,369 23,369 22,370 21,370 19,372 19,373 18,374 18,381 19,382 19,383 20,384 20,385 21,385 22,386 24,386 25,387 38,387 39,386 42,386 43,385 44,385 45,384 46,384 47,383 48,383 49,382 50,382 51,381 52,381 53,380 54,380 55,379 56,379 57,378 58,378 59,377 60,377 61,376 62,376 63,375 65,375 66,374 67,374 68,373 69,373 70,372 71,372 72,371 73,371 74,370 75,370 76,369 77,369 78,368 79,368 80,367 81,367 82,366 83,366 84,365 85,365 86,364 87,364 88,363 89,363 90,362 91,362 92,361 93,361 94,360 95,360 96,359 97,359 98,358 99,358 100,357 101,357 102,356 103,356 104,355 106,355 107,354 108,354 109,353 110,353 111,352 112,352 113,351 114,351 115,350 116,350 117,349 118,349 119,348 120,348 121,347 122,347 123,346 124,346 125,345 126,345 127,344 128,344 129,343 130,343 131,342 132,342 133,341 134,341 135,340 136,340 137,339 138,339 139,338 140,338 141,337 142,337 143,336 144,336 145,335 147,335 148,334 149,334 150,333 151,333 152,332 153,332 154,331 155,331 156,330 157,330 158,329 159,329 160,328 161,328 162,327 163,327 164,326 165,326 166,325 167,325 168,324 169,324 170,323 171,323 172,322 173,322 174,321 175,321 176,320 177,320 178,319 179,319 180,318 181,318 182,317 184,317 186,315 188,315 189,314 190,314 191,313 192,313 193,312 194,312 195,311 196,311 197,310 198,310 199,309 200,309 201,308 202,308 203,307 204,307 205,306 206,306 207,305 208,305 209,304 210,304 211,303 212,303 213,302 214,302 215,301 216,301 217,300 218,300 219,299 220,299 221,298 222,298 223,297 224,297 225,296 226,296 227,295 228,295 229,294 230,294 231,293 233,293 234,292 235,292 236,291 237,291 238,290 239,290 240,289 242,289 243,288 244,288 245,287 246,287 247,286 249,286 250,285 251,285 252,284 253,284 254,283 255,283 256,282 258,282 259,281 260,281 261,280 262,280 263,279 264,279 265,278 267,278 268,277 269,277 270,276 271,276 272,275 274,275 275,274 276,274 277,273 278,273 279,272 280,272 281,271 283,271 284,270 285,270 286,269 287,269 288,268 290,268 291,267 292,267 293,266 294,266 295,265 297,265 298,264 299,264 300,263 301,263 302,262 304,262 305,261 306,261 307,260 308,260 309,259 310,259 311,258 313,258 314,257 315,257 316,256 317,256 318,255 320,255 321,254 322,254 323,253 324,253 325,252 327,252 328,251 329,251 330,250 331,250 332,249 333,249 334,248 336,248 337,247 338,247 339,246 340,246 341,245 343,245 344,244 345,244 346,243 347,243 348,242 349,242 350,241 352,241 353,240 354,240 355,239 356,239 357,238 358,238 359,237 361,237 362,236 363,236 364,235 366,235 367,234 368,234 369,233 370,233 371,232 372,232 373,231 375,231 376,230 377,230 378,229 379,229 380,228 381,228 382,227 384,227 385,226 386,226 387,225 388,225 389,224 391,224 392,223 393,223 394,222 395,222 396,221 397,221 398,220 400,220 401,219 402,219 403,218 404,218 405,217 406,217 407,216 409,216 410,215 411,215 412,214 413,214 414,213 416,213 417,212 418,212 419,211 420,211 421,210 423,210 424,209 425,209 426,208 427,208 428,207 429,207 430,206 432,206 433,205 434,205 435,204 436,204 437,203 439,203 440,202 441,202 442,201 443,201 444,200 445,200 446,199 448,199 449,198 450,198 451,197 452,197 453,196 455,196 456,195 457,195 458,194 459,194 460,193 462,193 463,192 464,192 465,191 466,191 467,190 468,190 469,189 471,189 472,188 473,188 474,187 475,187 476,186 477,186 478,185 480,185 481,184 482,184 483,183 484,183 485,182 487,182 488,181 489,181 490,180 491,180 492,179 494,179 495,178 496,178 497,177 498,177 499,176 500,176 501,175 503,175 504,174 505,174 506,173 507,173 508,172 510,172 511,171 512,171 513,170 515,170 516,169 517,169 518,168 519,168 520,167 521,167 522,166 524,166 525,165 526,165 527,164 529,164 530,163 531,163 532,162 533,162 534,161 536,161 537,160 538,160 539,159 540,159 541,158 543,158 544,157 545,157 546,156 547,156 548,155 550,155 551,154 552,154 553,153 554,153 555,152 556,152 557,151 558,151 559,150 561,150 562,149 563,149 564,148 566,148 567,147 568,147 569,146 570,146 571,145 572,145 573,144 575,144 576,143 577,143 578,142 579,142 580,141 582,141 583,140 584,140 585,139 586,139 587,138 588,138 589,137 591,137 592,136 593,136 594,135 595,135 596,134 597,134 598,133 600,133 601,132 602,132 603,131 605,131 606,130 607,130 608,129 609,129 610,128 611,128 612,127 614,127 615,126 616,126 617,125 618,125 619,124 621,124 622,123 623,123 624,122 625,122 626,121 628,121 629,120 630,120 631,119 632,119 633,118 635,118 636,117 637,117 638,116 639,116 640,115 642,115 643,114 644,114 645,113 646,113 647,112 648,112 649,111 651,111 652,110 653,110 654,109 655,109 656,108 658,108 659,107 660,107 661,106 662,106 663,105 665,105 666,104 667,104 668,103 669,103 670,102 672,102 673,101 674,101 675,100 676,100 677,99 678,99 679,98 681,98 682,97 683,97 684,96 686,96 687,95 688,95 689,94 690,94 691,93 692,93 693,92 694,92 695,91 697,91 698,90 699,90 700,89 701,89 702,88 704,88 705,87 706,87 707,86 709,86 710,85 711,85 712,84 713,84 714,83 715,83 716,82 718,82 719,81 720,81 721,80 722,80 723,79 725,79 726,78 727,78 728,77 729,77 730,76 732,76 733,75 734,75 735,74 736,74 737,73 739,73 740,72 741,72 742,71 743,71 744,70 745,70 746,69 748,69 749,68 750,68 751,67 752,67 753,66 755,66 756,65 757,65 758,64 759,64 760,63 761,63 762,62 764,62 765,61 766,61 767,60 769,60 770,59 771,59 772,58 773,58 774,57 775,57 776,56 779,56 780,55 783,55 784,54 787,54 788,53 791,53 792,52 797,52 798,53 799,52 804,52 805,53 809,53 810,54 814,54 815,55 818,55 819,56 821,56 822,57 824,57 825,58 828,58 829,59 831,59 832,60 834,60 835,61 837,61 838,62 840,62 841,63 843,63 844,64 847,64 848,65 850,65 851,66 855,66 856,67 869,67 870,66 872,66 875,63 876,63 878,61 878,60 879,59 879,58 881,56 881,53 882,52 882,40 881,39 881,38 880,37 880,36 879,35 879,34 878,33 878,32 872,26 871,26 868,23 867,23 866,22 864,22 863,21 860,21 859,20 833,20 832,21 826,21 825,22 820,22 819,23 814,23 813,24 810,24 809,25 806,25 805,26 803,26 802,27 798,27 797,28 795,28 794,29 792,29 791,30 788,30 787,31 785,31 784,32 783,32 782,33 780,33 779,34 776,34 775,35 773,35 772,36 767,31 767,11" fill="none" stroke="white" stroke-width="4"></polyline>
-            <polygon points="694,48 691,51 690,51 688,53 687,53 684,56 683,56 683,58 686,58 687,57 690,57 691,56 694,56 695,55 699,55 699,53 698,53 697,52 697,51 696,50 696,48" fill="#FF0000"></polygon>
-            </svg>
-        """
-    
-    img, _ = imread_from_url(image_path)
-    if img is None:
-        print(f"Error: Could not load image {image_path}")
-        return ""
-
-    h, w = img.shape[:2]
-    h = h + 50
-    w = w + 100
-    svg_elements = []
-
-    # 1. Track outline (white / grey)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, white_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-    
-    kernel = np.ones((3, 3), np.uint8)
-    white_mask_processed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-    
-    temp_contours, _ = cv2.findContours(white_mask_processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    track_only_mask = np.zeros_like(white_mask)
-    valid_track_contours = []
-    
-    for c in temp_contours:
-        area = cv2.contourArea(c)
-        if area > 1000:
-             valid_track_contours.append(c)
-             cv2.drawContours(track_only_mask, [c], -1, 255, -1)
-             
-    has_giant_contour = any(cv2.contourArea(c) > (h*w*0.1) for c in valid_track_contours)
-
-    if has_giant_contour: 
-       erosion_kernel = np.ones((3,3), np.uint8)
-       track_mask_for_fb = cv2.erode(track_only_mask, erosion_kernel, iterations=1)
-    else:
-       track_mask_for_fb = track_only_mask
-
-    inverted_track_mask = cv2.bitwise_not(track_mask_for_fb)
-    dist_transform = cv2.distanceTransform(inverted_track_mask, cv2.DIST_L2, 5)
-
-    white_contours, _ = cv2.findContours(track_mask_for_fb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    box_regions = []
-    for cnt in white_contours:
-        area = cv2.contourArea(cnt)
-        x, y, w_box, h_box = cv2.boundingRect(cnt)
-        bbox_area = w_box * h_box
-        
-        if bbox_area < 20 or bbox_area > 1000 or min(w_box, h_box) < 5:
-            continue
-        
-        fill_ratio = area / bbox_area if bbox_area > 0 else 0
-        if min(w_box, h_box) > 0:
-            aspect_ratio = max(w_box, h_box) / min(w_box, h_box)
-            roi = white_mask[max(0, y):min(gray.shape[0], y+h_box), max(0, x):min(gray.shape[1], x+w_box)]
-            white_pixel_ratio = np.sum(roi == 255) / (w_box * h_box) if roi.size > 0 else 0
-            
-            perimeter = cv2.arcLength(cnt, True)
-            expected_perimeter = 2 * (w_box + h_box)
-            perimeter_ratio = perimeter / expected_perimeter if expected_perimeter > 0 else 0
-            
-            if (1.2 <= aspect_ratio <= 1.4 and fill_ratio > 0.7 and white_pixel_ratio > 0.8 and 0.8 <= perimeter_ratio <= 1.2):
-                box_regions.append((x, y, x+w_box, y+h_box))
-    
-    track_mask = white_mask.copy()
-    for x1, y1, x2, y2 in box_regions:
-        cv2.rectangle(track_mask, (x1, y1), (x2, y2), 0, -1)
-    
-    contours, _ = cv2.findContours(track_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    track_contours = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > 50:
-            track_contours.append(cnt)
-
-    if track_contours:
-        svg_elements.append('<g fill="none" stroke="white" stroke-width="4">')
-        for cnt in track_contours:
-            if cv2.contourArea(cnt) < 100:
-                continue
-            epsilon = 0.8
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            points = " ".join([f"{int(p[0][0])},{int(p[0][1])}" for p in approx])
-            svg_elements.append(f'<polyline points="{points}" />')
-        svg_elements.append('</g>')
-
-    # 2. Arrow Detection
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_red1 = np.array([0, 150, 80])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 150, 80])
-    upper_red2 = np.array([180, 255, 255])
-    
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    red_mask = cv2.bitwise_or(mask1, mask2)
-    
-    kernel = np.ones((3,3), np.uint8)
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
-    red_contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not red_contours:
-        lower_red_lenient1 = np.array([0, 120, 60])
-        lower_red_lenient2 = np.array([170, 120, 60])
-        mask_lenient = cv2.bitwise_or(
-            cv2.inRange(hsv, lower_red_lenient1, upper_red1),
-            cv2.inRange(hsv, lower_red_lenient2, upper_red2)
-        )
-        mask_lenient = cv2.morphologyEx(mask_lenient, cv2.MORPH_OPEN, kernel)
-        red_contours, _ = cv2.findContours(mask_lenient, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    for cnt in red_contours:
-        area = cv2.contourArea(cnt)
-        if area < 30: continue
-
-        M = cv2.moments(cnt)
-        if M["m00"] != 0:
-            cx = int(M["m10"]/M["m00"])
-            cy = int(M["m01"]/M["m00"])
-            if 0 <= cy < dist_transform.shape[0] and 0 <= cx < dist_transform.shape[1]:
-                if dist_transform[cy, cx] > 60:
-                    continue
-        
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        solidity = float(area)/hull_area if hull_area > 0 else 0
-        
-        epsilon = 0.04 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        vertices = len(approx)
-        
-        if (0.5 < solidity < 0.95 and 3 <= vertices <= 7) or area > 50: 
-             points = " ".join([f"{p[0][0]},{p[0][1]}" for p in cnt])
-             svg_elements.append(f'<polygon points="{points}" fill="#FF0000" />')
-
-    svg_content = (
-        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
-        f'xmlns="http://www.w3.org/2000/svg" style="background: #111;">\n'
-    )
-    for element in svg_elements:
-        svg_content += f"  {element}\n"
-    svg_content += '</svg>'
-    
-    return svg_content
-
 #This function gets the birthdate and nationality of a driver from their statsf1.com page. 
 def fetch_driver_info(driver_name):
     # Convert "George Russell" → "george-russell"
@@ -1033,13 +856,6 @@ def translate_reason(text):
     text = text.strip()
     if not text:
         return None
-    # Try DeepL / Deepl first (import dynamically), fall back to Google
-    try:
-        translated = DeeplTranslator(source='auto', target='en').translate(text)
-        if translated:
-            return translated
-    except Exception:
-        pass
     try:
         translated = GoogleTranslator(source='auto', target='en').translate(text)
         return translated
@@ -3167,57 +2983,45 @@ def parse_race_results(links):
                             entrants[x] = entrant
                             break
         elif link['href'].endswith('/sprint.aspx'):
-            TIME_REGEX = re.compile(
-                r'(\d+h\s*)?(\d+m\s*)?(\d+(?:\.\d+)?s|\d+:\d{2}(?::\d{2}(?:\.\d+)?)?)'
-            )            
-            sprintweekend = True 
+            SPRINT_TIME_REGEX = re.compile(r'(?:\d+:)?\d{1,2}:\d{2}\.\d+')  #33'38.998 -> 33:38.998 after the apostrophe swap; may be preceded by a reason
+            sprintweekend = True
             open_url(f"https://www.statsf1.com{link['href']}")
             sprintpenalties = parse_penalties(soup, is_sprint=True)
             table = soup.find('table', class_ = 'datatable')
-            #You need to do shared cars and avoid exceptions when the sprint position is "ab" or something
+            #The sprint table has no car number column: pos | driver | constructor | engine | laps | time (gap) | places gained | points.
+            #Times are printed as 33'38.998, so they go through tts() rather than the race TIME_REGEX, which would truncate 33:38.998 to 33:38.
             rows = table.find('tbody').find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
                 for entrant in entrants:
                     if  normalize_name(entrant['driver'].lower()) in normalize_name(cells[1].get_text(strip=True).lower()):
                         x = entrants.index(entrant)
-                        # Process the main car entry
+                        raw = cells[5].get_text(strip=True).replace("'", ":")
+                        time_part = (raw.split('(')[0] if '(' in raw else raw).strip()
+                        entrant['sprintgap'] = raw.split('(')[1].replace(')', '') if '(' in raw and raw.split('(')[1].replace(')', '').strip().endswith('s') else None
+                        entrant['sprintgapinseconds'] = parse_race_time(entrant['sprintgap'].replace("+", "")) if entrant['sprintgap'] else None
+                        #A disqualified driver's cell carries the reason and the time together ("Technical non-compliance30'03.483").
+                        sprint_time_match = SPRINT_TIME_REGEX.search(time_part)
+                        if sprint_time_match:
+                            entrant['sprinttime'] = sprint_time_match.group(0)
+                            entrant['sprintstatusreason'] = time_part[:sprint_time_match.start()].strip() or None
+                            entrant['sprinttimeinseconds'] = tts(entrant['sprinttime'])
+                        else:
+                            entrant['sprinttime'] = None
+                            entrant['sprintstatusreason'] = time_part or None
+                            entrant['sprinttimeinseconds'] = None
                         if cells[0].get_text(strip=True) in ['ab', 'nc', 'np', 'nq', 'npq', 'dsq', 'exc', 'f', 'tf', 't']:
                             entrant['sprintposition'] = None
-                            entrant['sprintlaps'] = int(cells[5].get_text(strip=True)) if cells[5].get_text(strip=True).isdigit() else None
-                            entrant['sprinttime'] = cells[5].get_text(strip=True) + f" ({abbreviations[cells[0].get_text(strip=True)]})"
+                            entrant['sprintlaps'] = int(cells[4].get_text(strip=True)) if cells[4].get_text(strip=True).isdigit() else None
                             entrant['sprintstatus'] = abbreviations[cells[0].get_text(strip=True)]
-                            entrant['sprintgap'] = cells[6].get_text(strip=True).split('(')[1].replace(')', '') if '(' in cells[6].get_text(strip=True) and cells[6].get_text(strip=True).split('(')[1].replace(')', '').strip().endswith('s')  else None
-                            entrant['sprintgapinseconds'] = parse_race_time(entrant['sprintgap'].replace("+", "")) if entrant['sprintgap'] else None
-                            raw = cells[6].get_text(strip=True)
-                            m = TIME_REGEX.search(raw)
-                            if m:
-                                entrant['sprinttime'] = m.group(0).strip().replace("h ", ":").replace("m ", ":") if m.group(0).strip() else None
-                                entrant['sprintstatusreason'] = raw[:m.start()].strip() or None
-                            else:
-                                entrant['sprinttime'] = None
-                                entrant['sprintstatusreason'] = raw.strip() or None                                  
                             entrant['sprintpoints'] = 0
                         else:
                             entrant['sprintposition'] = int(cells[0].get_text(strip=True))
                             entrant['sprintlaps'] = int(cells[4].get_text(strip=True))
-                            entrant['sprinttime'] = cells[5].get_text(strip=True).split('(')[0].replace("'", ":") if '(' in cells[5].get_text(strip=True) else cells[5].get_text(strip=True)
-                            entrant['sprinttimeinseconds'] = tts(entrant['sprinttime'])
-                            entrant['sprintgap'] = cells[5].get_text(strip=True).split('(')[1].replace(')', '') if '(' in cells[5].get_text(strip=True) and cells[5].get_text(strip=True).split('(')[1].replace(')', '' ).strip().endswith('s')  else None
-                            entrant['sprintgapinseconds'] = parse_race_time(entrant['sprintgap'].replace("+", "")) if entrant['sprintgap'] else None
-                            raw = cells[6].get_text(strip=True)
-                            m = TIME_REGEX.search(raw)
-                            if m:
-                                entrant['sprinttime'] = m.group(0).strip().replace("h ", ":").replace("m ", ":") if m.group(0).strip() else None
-                                entrant['sprintstatusreason'] = raw[:m.start()].strip() or None
-                            else:
-                                entrant['sprinttime'] = None
-                                entrant['sprintstatusreason'] = raw.strip() or None  
-                            entrant['sprintstatus'] = 'Classified'                            
+                            entrant['sprintstatus'] = 'Classified'
                             entrant['sprintpoints'] = float(cells[7].get_text(strip=True)) if cells[7].get_text(strip=True).replace('.', '', 1).isdigit() else None
-                        # Parse penalties during and after the race
                         entrants[x] = entrant
-                        break                                                                                                         
+                        break
         elif link['href'].endswith('/classement.aspx'):
             TIME_REGEX = re.compile(
                 r'(\d+h\s*)?(\d+m\s*)?(\d+(?:\.\d+)?s|\d+:\d{2}(?::\d{2}(?:\.\d+)?)?)'
@@ -3444,6 +3248,10 @@ def parse_race_results(links):
                         if entrant['sprinttime'] is None:
                             timestewer = driver['time']
                             timestr = int(timestewer)
+                            if timestr == 0:
+                                entrant['sprinttime'] = None
+                                entrant['sprinttimeinseconds'] = None
+                                break
                             h = timestr // (3600000)
                             m = (timestr % 3600000) // 60000
                             s = (timestr % 60000) / 1000
@@ -4564,7 +4372,7 @@ def parse_championship_results (year, drivermap):
     latest_gp_id = cur.fetchone()[0]
     for row in driversrows:
         cells = row.find_all('td')
-        if cells[0].get('colspan')== '27':
+        if len(cells) < 3 or cells[0].get('colspan'):  # StatsF1's one-cell separator row ('cannot be world champions anymore'); its colspan is races + 3
             continue
         driverindo = {
             'position': int(cells[0].text.strip().replace('.', '')) if cells[0].get_text(strip=True).replace('.', '').isdigit() else driverschampionship[-1]["position"],
@@ -4611,7 +4419,7 @@ def parse_championship_results (year, drivermap):
         headercells = constructors_table.find_all('tr')[0].find_all('td')  # Get headers from first row
         for row in constructorsrows:
             cells = row.find_all('td')
-            if cells[0].get('colspan') == '27':
+            if len(cells) < 3 or cells[0].get('colspan'):  # StatsF1's one-cell separator row ('cannot be world champions anymore'); its colspan is races + 3
                 continue
             constructorindo = {
                 'position': int(cells[0].text.strip().replace('.', '')) if cells[0].get_text(strip=True).replace('.', '').isdigit() else constructorschampionship[-1]["position"],
@@ -4832,7 +4640,7 @@ if cur.fetchone()[0] == 0:
                 layoutimg = layoutdiv.find('img')['src']
                 circuit_text_div = layoutdiv.find('div', class_='circuitversiontxt')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')            
-                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
+                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                 cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                 circuitlayoutid = cur.fetchone()[0]
@@ -4840,26 +4648,13 @@ else:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
     #if there are less than 1149 grands prix in the database, this will suffice.
     count = cur.fetchone()[0]
-    if count < 1161:
-        #Madrid is race 1161
+    if count < 1163:
+        #Madrid is race 1163
         mappings = {'Adelaide': ('-34.9269993', '138.6172609'), 'Aida': ('34.9152924', '134.2207281'), 'Ain-Diab': ('33.5805298', '-7.68909'), 'Aintree': ('53.4759049', '-2.9413726'), 'Anderstorp': ('57.2639056', '13.6030116'), 'Austin': ('30.1336367', '-97.6345729'), 'AVUS': ('52.48658', '13.26549'), 'Baku': ('40.3712591', '49.8476935'), 'Barcelona': ('41.5682768', '2.2582064'), 'Brands Hatch': ('51.3555433', '0.2629122'), 'Bremgarten': ('46.9581878', '7.402719'), 'Buenos Aires': ('-34.6922845', '-58.4550501'), 'Caesars Palace': ('36.119148', '-115.1771724'), 'Clermont-Ferrand': ('45.7456087', '3.0402848'), 'Dallas': ('32.7767709', '-96.7593567'), 'Detroit': ('42.3280081', '-83.0405242'), 'Dijon-Prenois': ('47.3619752', '4.8995105'), 'Donington': ('52.8296656', '-1.3749465'), 'East London': ('-33.0491788', '27.8745906'), 'Estoril': ('38.7491677', '-9.394149'), 'Fuji': ('35.3689657', '138.9281865'), 'Hockenheim': ('49.3308527', '8.5790215'), 'Hungaroring': ('47.5817579', '19.2507484'), 'Imola': ('44.3398577', '11.7133288'), 'Indianapolis': ('39.7955151', '-86.2362663,4080a,20y'), 'Interlagos': ('-23.7032926', '-46.696961'), 'Istanbul': ('40.9552661', '29.4096963'), 'Jacarepagua': ('-22.9779874', '-43.3958898'), 'Jarama': ('40.6147065', '-3.5860519'), 'Jeddah': ('21.6380938', '39.0994433'), 'Jerez de la Frontera': ('36.7075431', '-6.0326723'), 'Kuala Lumpur': ('2.7597106', '101.7371379'), 'Kyalami': ('-25.9976867', '28.067626'), 'Las Vegas': ('36.1170295', '-115.1649455'), 'Le Castellet': ('43.2511291', '5.7894971'), 'Le Mans': ('47.951629', '0.2101078'), 'Long Beach': ('33.7640562', '-118.1887551'), 'Lusail': ('25.4904378', '51.4538568'), 'Magny-Cours': ('46.8619335', '3.1655065'), 'Melbourne': ('-37.8491401', '144.9698726'), 'Mexico City': ('19.4002574', '-99.0902792'), 'Miami': ('25.9577398', '-80.238678'), 'Monaco': ('43.7380948', '7.4260503'), 'Monsanto': ('38.7165398', '-9.2007324'), 'Mont-Tremblant': ('46.1865295', '-74.6096944'), 'Montjuïc Park': ('41.3680722', '2.1517021'), 'Montreal': ('45.50589', '-73.52411'), 'Monza': ('45.6184477', '9.2876756'), 'Mosport Park': ('44.0468166', '-78.6744209'), 'Mugello': ('43.9971945', '11.3722542'), 'New Delhi': ('28.3473368', '77.5337797'), 'Nivelles': ('50.6197164', '4.3277699'), 'Nürburgring': ('50.3292676', '6.942535'), 'Österreichring': ('47.22244', '14.7595'), 'Pedralbes': ('41.3881241', '2.1173237'), 'Pescara': ('42.4773755', '14.1548578'), 'Phoenix': ('33.44701', '-112.07681'), 'Portimão': ('37.2288843', '-8.627678'), 'Porto': ('41.1685927', '-8.6786295'), 'Reims': ('49.2583768', '3.9230837'), 'Riverside': ('33.93438', '-117.27276'), 'Rouen-les-Essarts': ('49.3333869', '1.0022022'), 'Sakhir': ('26.0303897', '50.513543'), 'Sebring': ('27.4548527', '-81.3513999'), 'Shanghai': ('31.341322', '121.21911'), 'Silverstone': ('52.07159', '-1.01615'), 'Singapore': ('1.2875346', '103.8554768'), 'Sochi': ('43.4067237', '39.9569962'), 'Spa-Francorchamps': ('50.4386283', '5.9666064'), 'Spielberg': ('47.2235862', '14.7555404'), 'Suzuka': ('34.8431556', '136.5266977'), 'Valencia': ('39.458529', '-0.330191'), 'Watkins Glen': ('42.336931', '-76.924553'), 'Yas Marina': ('24.4717208', '54.6018358'), 'Yeongam': ('34.7372903', '126.4123532'), 'Zandvoort': ('52.3878911', '4.5430609'), 'Zeltweg': ('47.200012', '14.741163'), 'Zolder': ('50.9900265', '5.254855')}    
     else:
+        # Do not scrape the complete circuits index during an update. The race
+        # loop below fetches the individual circuit page when it needs one.
         mappings = {}
-        open_url("https://www.statsf1.com/en/circuits.aspx")
-        table = soup.find('table')
-        trs = table.find_all('tr')
-        for tr in trs[1:-1]:
-            p = tr.find_all('td')[0]
-            v = p.find('a')
-            print ("Processing circuit: ", v.get_text(strip=True))
-            twd = v['href']
-            open_url(f'https://www.statsf1.com/{twd}')
-            a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
-            coord_str = a_tag[a_tag.index('@') + 1 : a_tag.rindex(',')]
-            lat = coord_str[:coord_str.index(',')]
-            lng = coord_str[coord_str.index(',') + 1:]  
-            mappings[v.get_text(strip=True)] = (lat, lng)
-
 
     
 conn.commit()   
@@ -5021,6 +4816,7 @@ for season in seasons[index:]:
                 #this has been updated to 1163, so before the Madrid race.
                 #TODO: find a solution to this.
                 open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")  
+                official_circuit_name, track_type = parse_circuit_metadata(soup)
                 lat, lng = mappings[race_info['track_name']]
                 lat = parse_coordinate(lat)
                 lng = parse_coordinate(lng)
@@ -5037,18 +4833,19 @@ for season in seasons[index:]:
                     circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
                     dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                     version = circuitlayoutdivs.index(layoutdiv) + 1
-                    if version not in existing_version_numbers:
-                        layoutimg = layoutdiv.find('img')['src']
-                        t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
-                        circuit_text_div = soup.find('div', class_='circuittext')
-                        circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
-                        cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
-                        circuitlayoutid = cur.fetchone()[0]
+                    layoutimg = layoutdiv.find('img')['src']
+                    t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
+                    circuit_text_div = soup.find('div', class_='circuittext')
+                    circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                     
+                    if version not in existing_version_numbers:               
+                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t[0], t[1], circuit_text, official_circuit_name, track_type))
                     else:
-                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version))
+                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ? AND SVG = ? AND CircuitChanges = ? AND OfficialCircuitName = ? AND TrackType = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version, t[1], circuit_text, official_circuit_name, track_type))
+                    cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
+                    circuitlayoutid = cur.fetchone()[0]                        
         else:
             open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")
+            official_circuit_name, track_type = parse_circuit_metadata(soup)
             a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
             coord_str = a_tag[a_tag.index('@') + 1 : a_tag.rindex(',')]
             lat = coord_str[:coord_str.index(',')]
@@ -5067,10 +4864,10 @@ for season in seasons[index:]:
                 dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                 version = circuitlayoutdivs.index(layoutdiv) + 1
                 layoutimg = layoutdiv.find('img')['src']
-                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}')
+                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                 circuit_text_div = soup.find('div', class_='circuittext')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
+                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t[0], t[1], circuit_text, official_circuit_name, track_type))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version))   
                 circuitlayoutid = cur.fetchone()[0]      
         #print(race_info)

@@ -5,3 +5,6 @@ compress_db.py
 .vscode
 .agents
 .claude
+/scrapers/__pycache__/
+/updaters/__pycache__/
+sessionresults.db-journal

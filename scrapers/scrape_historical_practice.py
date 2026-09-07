@@ -708,8 +708,9 @@ def main():
         force=args.force,
         dry_run=args.dry_run,
         delay_range=tuple(args.delay),
+        db_path=args.db_path
     )
 
 
 if __name__ == "__main__":
-    main()
+    main(db_path="../sessionresults.db")
