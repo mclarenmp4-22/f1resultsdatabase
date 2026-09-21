@@ -333,7 +333,7 @@ def fetch_url(url, retries=3, extra_headers=None):
                 == "https://www.statsf1.com/errors/GenericErrorPage.htm"
             ):
                 raise Exception(
-                    "You have been IP blocked by statsf1.com. Please wait and try again later."
+                    "You have been IP blocked by statsf1.com. Please wait and try again after 24 hours."
                 )
             response.raise_for_status()
             if "statsf1.com" in url:
@@ -3798,7 +3798,7 @@ def scrape_tracinginsights (url, type=None, driver_abbr=None, fastf1_session=Non
             break
         except:
             retries += 1
-            time.sleep(1)
+            time.sleep(10)
             if retries == 3:
                 numberoflaps = list(fastf1_session.laps.pick_drivers(driver_abbr)['LapNumber'])
                 data = json.dumps({"lap": numberoflaps})
@@ -4201,7 +4201,7 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                                 grandprix_name = "Mexico City Grand Prix"  
                             elif grandprix_name == "Barcelona-Catalunya Grand Prix" and year >= 2026:  
                                 grandprix_name = "Barcelona Grand Prix"                        
-                            driversintracinginsightssession = json.loads(urllib.request.urlopen(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}/{urllib.parse.quote(grandprix_name)}/{session_}/drivers.json").read().decode('utf-8'))          
+                            driversintracinginsightssession = json.loads(urllib.request.urlopen(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}@main/{urllib.parse.quote(grandprix_name)}/{session_}/drivers.json").read().decode('utf-8'))          
                             for THEABBREVIATION in resolved_driver_map:
                                 if normalize_name(resolved_driver_map[THEABBREVIATION]['driver'].lower()) == normalize_name(driver_fullname.lower()):
                                     driver_abbr = THEABBREVIATION
@@ -4211,7 +4211,7 @@ def parse_lap_by_lap(linkhref, entrants, dataid=None, dataidrace=None, year=None
                             if not any(driver_abbr == driver['driver'] for driver in driversintracinginsightssession['drivers']):
                                 print(f"{driver_abbr} not in session {session_}")
                                 continue                            
-                            ti_url = f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}/{urllib.parse.quote(grandprix_name)}/{session_}/{driver_abbr}/laptimes.json"
+                            ti_url = f"https://cdn.jsdelivr.net/gh/TracingInsights/{year_int}@main/{urllib.parse.quote(grandprix_name)}/{session_}/{driver_abbr}/laptimes.json"
                             ti_laps = scrape_tracinginsights(ti_url, driver_abbr=driver_abbr, fastf1_session=ff1_session)
                             if session == "Race":
                                 driver_name = resolved_driver_map[driver_abbr]['driver']
@@ -4640,8 +4640,8 @@ if cur.fetchone()[0] == 0:
                 layoutimg = layoutdiv.find('img')['src']
                 circuit_text_div = layoutdiv.find('div', class_='circuitversiontxt')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')            
-                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t, circuit_text))
+                svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
+                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, TrackDirection, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, svg, track_direction, circuit_text))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                 circuitlayoutid = cur.fetchone()[0]
 else:
@@ -4816,7 +4816,7 @@ for season in seasons[index:]:
                 #this has been updated to 1163, so before the Madrid race.
                 #TODO: find a solution to this.
                 open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")  
-                official_circuit_name, track_type = parse_circuit_metadata(soup)
+                official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=race_info['track_name'])
                 lat, lng = mappings[race_info['track_name']]
                 lat = parse_coordinate(lat)
                 lng = parse_coordinate(lng)
@@ -4834,18 +4834,18 @@ for season in seasons[index:]:
                     dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                     version = circuitlayoutdivs.index(layoutdiv) + 1
                     layoutimg = layoutdiv.find('img')['src']
-                    t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
+                    svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                     circuit_text_div = soup.find('div', class_='circuittext')
                     circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                     
                     if version not in existing_version_numbers:               
-                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t[0], t[1], circuit_text, official_circuit_name, track_type))
+                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, track_direction, svg, circuit_text, official_circuit_name, track_type))
                     else:
-                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ? AND SVG = ? AND CircuitChanges = ? AND OfficialCircuitName = ? AND TrackType = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version, t[1], circuit_text, official_circuit_name, track_type))
+                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ? AND SVG = ? AND CircuitChanges = ? AND OfficialCircuitName = ? AND TrackType = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version, svg, circuit_text, official_circuit_name, track_type))
                     cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
                     circuitlayoutid = cur.fetchone()[0]                        
         else:
             open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")
-            official_circuit_name, track_type = parse_circuit_metadata(soup)
+            official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=race_info['track_name'])
             a_tag = soup.find('a', id='ctl00_CPH_Main_HL_GMaps')['href']
             coord_str = a_tag[a_tag.index('@') + 1 : a_tag.rindex(',')]
             lat = coord_str[:coord_str.index(',')]
@@ -4856,6 +4856,7 @@ for season in seasons[index:]:
             race_info['latitude'], race_info['longitude'] = lat, lng
             race_info['timezone'] = get_timezone_from_coords(lat, lng)
             country = get_country_from_coords(lat, lng)
+            race_info['country'] = country
             elevation = get_elevation_from_coords(lat, lng)
             print(f"Processing circuit: {race_info['track_name']}")
             circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
@@ -4864,10 +4865,10 @@ for season in seasons[index:]:
                 dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                 version = circuitlayoutdivs.index(layoutdiv) + 1
                 layoutimg = layoutdiv.find('img')['src']
-                t = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
+                svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                 circuit_text_div = soup.find('div', class_='circuittext')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, t[0], t[1], circuit_text, official_circuit_name, track_type))
+                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, track_direction, svg, circuit_text, official_circuit_name, track_type))
                 cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version))   
                 circuitlayoutid = cur.fetchone()[0]      
         #print(race_info)
@@ -5298,7 +5299,7 @@ for season in seasons[index:]:
                     # Practice 1
                     if any(link['href'].endswith('practice/1') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
                         practice1_session = require_session_record(session_lookup, 'practice1', gp)
-                        qwertyuiop = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/drivers.json", headers=headers)
+                        qwertyuiop = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/drivers.json", headers=headers)
                         driverdatafortracinginsights = json.loads(urllib.request.urlopen(qwertyuiop).read())['drivers']
                         
                         # Get MSS laptimes for FP1 as fallback
@@ -5334,7 +5335,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice1data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/{driver_abbr}/laptimes.json", 'practice1', driver_abbr=driver_abbr)
+                                practice1data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%201/{driver_abbr}/laptimes.json", 'practice1', driver_abbr=driver_abbr)
                                 for practice1lap in practice1data:
                                     # Use MSS data as fallback if TracingInsights time is None
                                     time_val = practice1lap.get('time')
@@ -5361,7 +5362,7 @@ for season in seasons[index:]:
                     # Practice 2
                     if any(link['href'].endswith('practice/2') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
                         practice2_session = require_session_record(session_lookup, 'practice2', gp)
-                        asdfghjkl = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/drivers.json", headers=headers)
+                        asdfghjkl = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/drivers.json", headers=headers)
                         driverdatafortracinginsights2 = json.loads(urllib.request.urlopen(asdfghjkl).read())['drivers']
                         
                         # Get MSS laptimes for FP2 as fallback
@@ -5396,7 +5397,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice2data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/{driver_abbr}/laptimes.json", 'practice2', driver_abbr=driver_abbr)
+                                practice2data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%202/{driver_abbr}/laptimes.json", 'practice2', driver_abbr=driver_abbr)
                                 for practice2lap in practice2data:
                                     # Use MSS data as fallback
                                     time_val = practice2lap.get('time')
@@ -5423,7 +5424,7 @@ for season in seasons[index:]:
                     # Practice 3
                     if any(link['href'].endswith('practice/3') for link in theplacewithallthelinks.find_all('a', class_ = 'DropdownMenuItem-module_dropdown-menu-item__6Y3-v typography-module_body-s-semibold__O2lOH')):
                         practice3_session = require_session_record(session_lookup, 'practice3', gp)
-                        zxcvbnm = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/drivers.json", headers=headers)
+                        zxcvbnm = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/drivers.json", headers=headers)
                         driverdatafortracinginsights3 = json.loads(urllib.request.urlopen(zxcvbnm).read())['drivers']
                         
                         # Get MSS laptimes for FP3 as fallback
@@ -5458,7 +5459,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                practice3data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/{driver_abbr}/laptimes.json", 'practice3', driver_abbr=driver_abbr)
+                                practice3data = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Practice%203/{driver_abbr}/laptimes.json", 'practice3', driver_abbr=driver_abbr)
                                 for practice3lap in practice3data:
                                     # Use MSS data as fallback
                                     time_val = practice3lap.get('time')
@@ -5508,7 +5509,7 @@ for season in seasons[index:]:
                                                 sq_lap_chart[key] = position
                                             break
                         
-                        qwertyasdf = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/drivers.json", headers=headers)
+                        qwertyasdf = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/drivers.json", headers=headers)
                         driverdatafortracinginsights4 = json.loads(urllib.request.urlopen(qwertyasdf).read())['drivers']
                         
                         for driver in driverdatafortracinginsights4:
@@ -5523,7 +5524,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                sprintqualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
+                                sprintqualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/{urlforlink}/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
                                 
                                 # Group laps by driver to determine qs
                                 driver_laps = [lap for lap in sprintqualifyingdata if lap]
@@ -5580,7 +5581,7 @@ for season in seasons[index:]:
                                                 q_lap_chart[key] = position
                                             break
                         
-                        zxcvbnmasdf = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/drivers.json", headers=headers)
+                        zxcvbnmasdf = urllib.request.Request(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/drivers.json", headers=headers)
                         driverdatafortracinginsights5 = json.loads(urllib.request.urlopen(zxcvbnmasdf).read())['drivers']
                         
                         for driver in driverdatafortracinginsights5:
@@ -5595,7 +5596,7 @@ for season in seasons[index:]:
                                 tracing_team=driver_team
                             )  
                             if matched_entrant:
-                                qualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
+                                qualifyingdata = scrape_tracinginsights(f"https://cdn.jsdelivr.net/gh/TracingInsights/{year}@main/{urllib.parse.quote(gp_.replace(str(year), '').strip())}/Qualifying/{driver_abbr}/laptimes.json", driver_abbr=driver_abbr)
                                 
                                 # Group laps by driver to determine qs
                                 driver_laps = [lap for lap in qualifyingdata if lap]

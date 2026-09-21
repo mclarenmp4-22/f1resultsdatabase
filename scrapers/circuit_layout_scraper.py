@@ -1,11 +1,13 @@
+import logging
 import re
-import urllib.request
 import math
 import cv2
 import numpy as np
 from ollama import chat
 import json
 import os
+import shutil
+import pytesseract
 headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -21,15 +23,36 @@ def imread_from_url(url):
     response = fetch_url(url, extra_headers={'Referer': 'https://www.statsf1.com/'})
     image_bytes = response.content
 
+    img = decode_layout_image(image_bytes, url, response.headers.get('content-type'))
+    return img, image_bytes
+
+
+# Every layout map statsf1 serves is 920px wide. When the site is rate limiting
+# it answers GetImage.ashx with a 24x16 placeholder that decodes perfectly well,
+# and one run stored six layouts traced off exactly that: an SVG with no track
+# in it. Anything narrower than this is not a map.
+MIN_LAYOUT_IMAGE_WIDTH = 400
+
+
+def decode_layout_image(image_bytes, source, content_type=None):
+    """Decode map bytes to BGR, refusing anything that is not a real map."""
     image_array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError(
-            f"Could not decode an image from {url} "
-            f"(content-type {response.headers.get('content-type')!r}, {len(image_bytes)} bytes)"
+            f"Could not decode an image from {source} "
+            f"(content-type {content_type!r}, {len(image_bytes)} bytes)"
         )
-    return img, image_bytes
+    if img.shape[1] < MIN_LAYOUT_IMAGE_WIDTH:
+        raise RuntimeError(
+            f"{source} decoded to a {img.shape[1]}x{img.shape[0]} image, which is a "
+            f"placeholder rather than a layout map (statsf1 is probably rate limiting)"
+        )
+    return img
 
+import html
+import unicodedata
+from pathlib import Path
 from PIL import Image
 
 
@@ -50,90 +73,16 @@ def gimp_contrast(pil_gray, contrast=1.0, pivot=200):
     slope = math.tan((contrast + 1.0) * math.pi / 4.0)
     return pil_gray.point(lambda p: max(0, min(255, int((p - pivot) * slope + pivot))))
 
-GEGL_LUMA = (0.22248840, 0.71690369, 0.06060791)
-
-
-def _srgb_to_linear(a):
-    """0-1 gamma-encoded sRGB -> linear light."""
-    return np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
-
-
-def _linear_to_srgb(a):
-    """Inverse of _srgb_to_linear. Clipped first: saturation can push a channel
-    negative, and a fractional power of a negative is NaN."""
-    a = np.clip(a, 0.0, 1.0)
-    return np.where(a <= 0.0031308, a * 12.92, 1.055 * np.power(a, 1.0 / 2.4) - 0.055)
-
-
-def gimp_saturation(pil_rgb, scale=2.0, linear_light=False):
-    """Replicate GIMP 3.x's Colors > Saturation (gegl:saturation) on an RGB image.
-
-    GEGL interpolates each channel away from the pixel's own luminance:
-        out = luma + (in - luma) * scale
-    so greys stay exactly grey at any scale and only genuinely coloured pixels
-    move. That is the whole point for the second pass: it drags the red arrow
-    away from the aerial photo without touching the white track or the flag.
-
-    The Interpolation Color Space dropdown decides which values that runs on.
-    linear_light=False matches "Native" on a normal 8-bit gamma image (GIMP 3's
-    default precision), which is what the screenshots show. Set it True if the
-    image was opened at a linear precision instead - the arrow survives either
-    way, the aerial photo just fades differently.
-    """
-    arr = np.asarray(pil_rgb.convert("RGB"), dtype=np.float32) / 255.0
-    if linear_light:
-        arr = _srgb_to_linear(arr)
-
-    r, g, b = GEGL_LUMA
-    luma = arr[:, :, 0] * r + arr[:, :, 1] * g + arr[:, :, 2] * b
-    out = luma[:, :, None] + (arr - luma[:, :, None]) * scale
-
-    if linear_light:
-        out = _linear_to_srgb(out)
-    # Round rather than truncate: the luma weights sum to 1.0 so a grey pixel is
-    # its own luma and must come back bit-identical, but the /255 -> *255 round
-    # trip lands on 199.99999 and truncation would drop it under the pivot.
-    return Image.fromarray(np.clip(np.rint(out * 255.0), 0, 255).astype(np.uint8), mode="RGB")
-
-
-def gimp_contrast_rgb(pil_rgb, contrast=1.0, pivot=200):
-    """RGB counterpart of gimp_contrast(), same curve applied per channel.
-
-    gimp_contrast() takes an "L" image and the second pass has to keep colour
-    (the arrow is red, the start/finish flag is black-and-white), so the same
-    tan-slope curve runs on R, G and B independently around the same pivot.
-    At contrast = 1.0 every channel becomes a hard step, so each pixel lands on
-    one of the eight corners of the RGB cube - white track, black photo, red
-    arrow - which is what the max-contrast GIMP result looks like.
-    """
-    contrast = min(max(contrast, -1.0), 1.0)
-    arr = np.asarray(pil_rgb.convert("RGB"), dtype=np.float32)
-    if contrast >= 1.0:
-        out = np.where(arr > pivot, 255.0, 0.0)
-    else:
-        slope = math.tan((contrast + 1.0) * math.pi / 4.0)
-        out = (arr - pivot) * slope + pivot
-    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
-
-
-def preprocess_second_pass(pil_rgb, saturation=2.0, contrast=1.0, pivot=200,
-                           linear_light=False):
-    """Saturation x2 then max contrast - the GIMP recipe for the arrow /
-    start-finish pass. Takes and returns a PIL RGB image; intended for
-    pil_img_p2, the copy the first pass already sets aside untouched."""
-    boosted = gimp_saturation(pil_rgb, scale=saturation, linear_light=linear_light)
-    return gimp_contrast_rgb(boosted, contrast=contrast, pivot=pivot)
-
 
 def scale_box_to_pixels(qwen_box, actual_width, actual_height):
     xmin, ymin, xmax, ymax = qwen_box
-    
+
     # Convert from 0-1000 system to real fractional percentages
     pixel_xmin = int((xmin / 1000.0) * actual_width)
     pixel_ymin = int((ymin / 1000.0) * actual_height)
     pixel_xmax = int((xmax / 1000.0) * actual_width)
     pixel_ymax = int((ymax / 1000.0) * actual_height)
-    
+
     # Return standard bounding box format
     return (pixel_xmin, pixel_ymin, pixel_xmax, pixel_ymax)
 
@@ -154,19 +103,12 @@ MIN_RADIUS_FRACTION = 0.05
 # "piste.xxx" of /images/GetImage.ashx?id=piste.xxx - so an entry names exactly
 # one map and cannot drift onto another version of the same circuit.
 #
-# Two things put a layout here, and they are not the same thing:
-#
-#   - the arrow is unreadable against the centroid. Miami's arrow points almost
-#     straight at the centre of its own layout (tangentiality 0.013), so the
-#     cross product is the residue of two nearly equal products and its sign is
-#     noise. That is what the tangentiality gate is for, and the gate is right
-#     to drop it; the entry here is what fills the hole afterwards.
-#   - the arrow reads cleanly and the reading is wrong anyway. Dallas resolves
-#     at 0.367, nowhere near the gate, and still comes out backwards: the arrow
-#     sits due east of the centroid pointing west, which is the same radial
-#     degeneracy showing up as a middling number rather than a small one. No
-#     threshold catches this, which is why the table is applied wherever it has
-#     an entry rather than only where the detector gave up.
+# The table is applied wherever it has an entry, not only where the detector
+# gave up, so an entry here is the final word on that map. It used to carry
+# twenty-odd layouts the centroid reading got wrong or could not read; the
+# outline reading (tangent_direction) settles every one of those off the map
+# itself, and they were taken out once it had been checked against all 171
+# layouts. What is left is the one map that has no single direction.
 #
 # statsf1's own "Direction" field is not the source for these. It is per circuit
 # rather than per layout, so it reports the modern direction for a circuit that
@@ -174,25 +116,6 @@ MIN_RADIUS_FRACTION = 0.05
 # and it is outright wrong on at least Interlagos, which it calls Clockwise. The
 # values below were read off the maps.
 DIRECTION_OVERRIDES = {
-    # Unreadable against the centroid: the arrow points so nearly at (or away
-    # from) the centre of its own layout that the cross product is the residue
-    # of two nearly equal products and its sign is noise. Tangentiality in
-    # brackets - the gate at MIN_TANGENTIALITY drops all of these.
-    "piste.baku1": "Anticlockwise",         # 0.010
-    "piste.miami1": "Anticlockwise",        # 0.013
-    "piste.yasmarina1": "Anticlockwise",    # 0.015
-    "piste.newdelhi1": "Clockwise",         # 0.027, Buddh
-    "piste.kualalumpur": "Clockwise",       # 0.210, Sepang
-    "piste.lecastellet1": "Clockwise",      # 0.752
-
-    # Read cleanly and came out backwards anyway. Same radial degeneracy, but
-    # presenting as a middling tangentiality rather than a small one, so no
-    # threshold separates them from the readings that are right - which is why
-    # this table is consulted wherever it has an entry rather than only where
-    # the detector gave up.
-    "piste.dallas": "Anticlockwise",        # 0.367
-    "piste.sebring": "Clockwise",           # 0.766
-
     # Suzuka crosses over itself, so it is neither direction and it is not
     # "Both" either - "Both" means the same loop was raced each way round on
     # different occasions, while a figure of eight is one lap that turns both
@@ -203,18 +126,6 @@ DIRECTION_OVERRIDES = {
     # detection problem.
     "piste.suzuka1": "Figure of eight",
     "piste.suzuka2": "Figure of eight",
-    "piste.spa2": "Clockwise",              # 0.266
-    "piste.spa3": "Clockwise",              # 0.266
-    "piste.spa4": "Clockwise",              # 0.267
-    "piste.jerez1": "Clockwise",            # 0.251
-    "piste.jerez2": "Clockwise",            # 0.052
-    "piste.phoenix2": "Anticlockwise",      # 0.082
-    "piste.zandvoort3": "Clockwise",
-    "piste.zandvoort4": "Clockwise",
-    "piste.zandvoort5": "Clockwise",
-    "piste.zolder1": "Clockwise",
-    "piste.zolder2": "Clockwise",
-    "piste.zeltweg": "Clockwise",
 }
 
 
@@ -339,12 +250,6 @@ def layout_id(image_path):
     return match.group(1) if match else None
 
 
-def box_centre(qwen_box, actual_width, actual_height):
-    """Centre of a 0-1000 normalised box, in pixels of the original image."""
-    x_min, y_min, x_max, y_max = scale_box_to_pixels(qwen_box, actual_width, actual_height)
-    return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
-
-
 def track_centroid(contours, image_shape):
     """Area centroid of the region the track encloses.
 
@@ -456,6 +361,12 @@ ARROW_HEAD_FRACTION = 0.38
 # gate below is meant to reject. Off the original the confusion never arises.
 ARROW_RED_MIN = 120          # floor on the red channel itself
 ARROW_RED_DOMINANCE = 50     # how far red has to lead both green and blue
+# The colour gate above still lets a red rooftop through on an aerial map -
+# Baku's turn-20 building, the La Caixa grandstand at Barcelona - because a
+# roof in sunlight does lead green and blue by 50. What it never does is reach
+# the arrow's flat vector red: across all 157 maps the arrow's 90th-percentile
+# red is 233 or more, the rooftops' 161 or less. This is the gate between.
+ARROW_MIN_RED_P90 = 200
 ARROW_MIN_AREA_FRACTION = 2e-5
 ARROW_MIN_LENGTH_FRACTION = 0.02
 ARROW_MIN_ELONGATION = 1.6
@@ -587,8 +498,47 @@ def _head_end(sel):
     return tip, base, length, across.max() - across.min(), confidence
 
 
-def detect_arrows(bgr, track_mask=None, max_arrows=2):
-    """Every direction arrow on the map, as (base, tip) pixel pairs.
+def _shaft_hint(white_labels, white_stats, sel, base, tip):
+    """Which end of the red head the shaft is on, read off the arrow's outline.
+
+    Every arrow is drawn with a white outline round head and shaft alike, and
+    on a few maps (Monaco's early layouts) the shaft itself carries no red at
+    all - it is a hairline drawn white-black-white, like the flag's leader -
+    so the red detector sees the head triangle alone, and a triangle alone is
+    heaviest at its back. The outline settles it: its pixels lie round the
+    whole arrow, so their centroid sits off the head's centroid towards the
+    shaft, and the point is the other way. Returns (tip, base) or None where
+    the outline says nothing (merged into the track, or no offset to speak
+    of), in which case the caller keeps the head's own vote.
+    """
+    ys, xs = np.nonzero(sel)
+    x1, y1, x2, y2 = xs.min() - 6, ys.min() - 6, xs.max() + 6, ys.max() + 6
+    outline = np.zeros(sel.shape, dtype=bool)
+    for i in range(1, white_stats.shape[0]):
+        if white_stats[i, cv2.CC_STAT_AREA] > TEXT_MAX_GLYPH_AREA:
+            continue
+        left, top = white_stats[i, cv2.CC_STAT_LEFT], white_stats[i, cv2.CC_STAT_TOP]
+        right, bottom = left + white_stats[i, cv2.CC_STAT_WIDTH], top + white_stats[i, cv2.CC_STAT_HEIGHT]
+        if left < x2 and right > x1 and top < y2 and bottom > y1:
+            outline |= (white_labels == i)
+    if outline.sum() < 10:
+        return None
+    oy, ox = np.nonzero(outline)
+    head = np.array([xs.mean(), ys.mean()])
+    axis = np.array([tip[0] - base[0], tip[1] - base[1]], dtype=np.float64)
+    length = np.linalg.norm(axis)
+    if length == 0:
+        return None
+    axis /= length
+    offset = float((np.array([ox.mean(), oy.mean()]) - head) @ axis)
+    if abs(offset) < 0.2 * length:
+        return None
+    # The shaft lies towards the outline's centroid; the point is the other end.
+    return (base, tip) if offset > 0 else (tip, base)
+
+
+def detect_arrows(bgr, track_mask=None, max_arrows=2, white_mask=None):
+    """Every direction arrow on the map, as (base, tip, bbox) in pixels.
 
     Replaces asking a 4b VLM for a tip box and a base box per arrow. The model
     was dependable about where the arrow sits and not about which of the two
@@ -613,6 +563,9 @@ def detect_arrows(bgr, track_mask=None, max_arrows=2):
 
     mask = arrow_red_mask(bgr)
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    white_labels = white_stats = None
+    if white_mask is not None:
+        _, white_labels, white_stats, _ = cv2.connectedComponentsWithStats(white_mask, 8)
 
     claimed = np.zeros(mask.shape, dtype=bool)
     arrows = []
@@ -624,24 +577,32 @@ def detect_arrows(bgr, track_mask=None, max_arrows=2):
         sel = _glue_axis_fragments(label, labels, stats, centroids, diagonal) & ~claimed
         if sel.sum() < min_area:
             continue
+        if np.percentile(bgr[sel][:, 2], 90) < ARROW_MIN_RED_P90:
+            continue
         tip, base, length, thickness, confidence = _head_end(sel)
         if (length < ARROW_MIN_LENGTH_FRACTION * diagonal
                 or length / max(thickness, 1e-6) < ARROW_MIN_ELONGATION
                 or confidence < ARROW_MIN_CONFIDENCE):
             continue
+        if white_labels is not None:
+            hint = _shaft_hint(white_labels, white_stats, sel, base, tip)
+            if hint is not None:
+                tip, base = hint
         if track_distance is not None:
             mx = int(min(max((base[0] + tip[0]) / 2.0, 0), width - 1))
             my = int(min(max((base[1] + tip[1]) / 2.0, 0), height - 1))
             if track_distance[my, mx] > ARROW_MAX_TRACK_DISTANCE_FRACTION * diagonal:
                 continue
         claimed |= sel
-        arrows.append((tuple(base), tuple(tip), int(sel.sum()), length, confidence))
+        ys, xs = np.nonzero(sel)
+        box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        arrows.append((tuple(base), tuple(tip), box, length, confidence))
 
     # A second arrow has to look like the first one to be believed - see the note
-    # on SECOND_ARROW_AREA_RATIO.
+    # on SECOND_ARROW_CONFIDENCE_RATIO.
     if len(arrows) == 2 and arrows[1][4] < SECOND_ARROW_CONFIDENCE_RATIO * arrows[0][4]:
         del arrows[1]
-    return [(base, tip) for base, tip, _, _, _ in arrows]
+    return [(base, tip, box) for base, tip, box, _, _ in arrows]
 
 
 def arrow_endpoints(base, tip, length):
@@ -706,153 +667,6 @@ def arrow_svg(base, tip, offset_x, offset_y, head_length=9.0, stroke_width=3.0,
         f'<polygon points="{point[0]:.1f},{point[1]:.1f} '
         f'{left[0]:.1f},{left[1]:.1f} {right[0]:.1f},{right[1]:.1f}" fill="{colour}" />',
     ]
-
-
-# Flag erasure safety. The flag box comes from the model, and one drawn a few
-# pixels too generously runs into the track. A partial bite is harmless - it
-# thins the stroke, the outline stays closed - but a box reaching all the way
-# across severs the circuit, and what gets traced is no longer a loop. That shows
-# up as a collapse in the area the largest external contour encloses: an intact
-# ring encloses the whole infield, while a severed one has its contour snake in
-# through the gap and back around the inside, so it encloses only the stroke
-# material. Measured on a 10px stroke, biting nine pixels of it leaves the ratio
-# at 0.996 and the tenth drops it to 0.24 - a step with a 4x gap either side of
-# it, so the threshold needs no tuning and anything from 0.3 to 0.95 behaves the
-# same. The retreat is deliberately small: an overlap this check can see is at
-# most a stroke wide, and the measured case cleared in three pixels.
-# The bar is drawn in its own colour rather than the track's white. Drawn white
-# it is invisible: it sits on top of a white stroke, and the only thing marking
-# the spot is then the label. The overhang is what makes it read as crossing the
-# track rather than being part of it, so it is sized off the image instead of the
-# stroke - a few pixels either side of a 9px stroke disappears at a glance.
-START_FINISH_COLOUR = "#FFD200"
-START_FINISH_OVERHANG_FRACTION = 0.010
-MIN_START_FINISH_OVERHANG = 7.0
-
-LOOP_INTACT_RATIO = 0.5
-FLAG_RETREAT_STEP = 2
-FLAG_RETREAT_LIMIT = 16
-
-
-def _largest_external_area(mask):
-    """Area enclosed by the biggest external contour - the loop-intact measure."""
-    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return max((cv2.contourArea(c) for c in contours), default=0.0)
-
-
-# How far past the box edge the remnant sweep looks, and how big a component it
-# is still willing to call flag. The margin covers a box that under-covers the
-# glyph - the leftover is contiguous with the erased area, so it starts at the
-# box edge - plus some slack for a box displaced outright. The area cap is what
-# keeps the sweep honest on maps where the source image draws the circuit broken
-# at the flag line: those pieces are each a large share of the track, while a
-# flag remnant is never more than a glyph, so anything near a tenth of the
-# largest component is track and stays.
-FLAG_SWEEP_AREA_RATIO = 0.1
-
-
-def _sweep_flag_remnants(mask, box_px):
-    """Delete detached leftovers of the flag the box erase failed to cover.
-
-    The box erase can only remove what the box contains, and a box the model
-    draws too small leaves the rest of the glyph standing - severed from the
-    track by the erase, so it gets traced as a stray blob right next to the
-    start/finish bar. Those leftovers have a signature the box does not need to
-    be accurate for: a small connected component that is not the circuit,
-    sitting in or against the box. Everything matching it goes; the largest
-    component is never touched, so this cannot sever anything.
-
-    Returns the number of components removed. Modifies `mask` in place.
-    """
-    x1, y1, x2, y2 = box_px
-    margin = max(10.0, 0.5 * max(x2 - x1, y2 - y1))
-    gx1, gy1, gx2, gy2 = x1 - margin, y1 - margin, x2 + margin, y2 + margin
-
-    num, comp_map, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if num <= 2:
-        return 0
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    largest = 1 + int(np.argmax(areas))
-    cap = FLAG_SWEEP_AREA_RATIO * float(stats[largest, cv2.CC_STAT_AREA])
-
-    removed = 0
-    for i in range(1, num):
-        if i == largest or stats[i, cv2.CC_STAT_AREA] >= cap:
-            continue
-        bx, by, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],                          stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-        if bx <= gx2 and bx + bw >= gx1 and by <= gy2 and by + bh >= gy1:
-            mask[comp_map == i] = 0
-            removed += 1
-    return removed
-
-
-def erase_chequered_flag(white_mask, flag_box, flag_line_box, orig_w, orig_h):
-    """Cut the flag out of the mask, but never at the cost of cutting the circuit.
-
-    Erases the box, checks the circuit came through it still a loop, and if it
-    did not, gives ground two pixels at a time until it did. The touch box aims
-    the retreat where there is one: it is the one part of the picture guaranteed
-    to be track, so the edges facing it are the ones doing the cutting. Without
-    it there is nothing to aim by and the box simply shrinks from every side.
-
-    If no amount of retreating leaves the loop intact the flag is left where it
-    is. A stray rectangle in the output is a far smaller problem than a circuit
-    with a hole in it, and unlike the hole it is obvious on sight.
-
-    Returns (mask, retreat) - a new mask, and the pixels of ground given up, or
-    None if the flag had to be left alone.
-    """
-    x1, y1, x2, y2 = scale_box_to_pixels(flag_box, orig_w, orig_h)
-    baseline = _largest_external_area(white_mask)
-
-    touch = box_centre(flag_line_box, orig_w, orig_h) if flag_line_box else None
-    if touch is None:
-        left = right = top = bottom = 1
-    else:
-        # A box that has run into the track has the touch point inside it, so
-        # which side is nearest is what identifies the edge that did the cutting.
-        # Giving ground on any other only costs flag coverage for nothing.
-        gaps = (("left", touch[0] - x1), ("right", x2 - touch[0]),
-                ("top", touch[1] - y1), ("bottom", y2 - touch[1]))
-        nearest = min(gaps, key=lambda g: abs(g[1]))[0]
-        left, right = int(nearest == "left"), int(nearest == "right")
-        top, bottom = int(nearest == "top"), int(nearest == "bottom")
-
-    for retreat in range(0, FLAG_RETREAT_LIMIT + 1, FLAG_RETREAT_STEP):
-        ax1, ay1 = x1 + left * retreat, y1 + top * retreat
-        ax2, ay2 = x2 - right * retreat, y2 - bottom * retreat
-        if ax2 - ax1 < 2 or ay2 - ay1 < 2:
-            break
-        trial = white_mask.copy()
-        cv2.rectangle(trial, (ax1, ay1), (ax2, ay2), 0, -1)
-        if baseline <= 0 or _largest_external_area(trial) >= LOOP_INTACT_RATIO * baseline:
-            _sweep_flag_remnants(trial, (x1, y1, x2, y2))
-            return trial, retreat
-
-    # Even with the box unusable, a flag the erase has to leave alone may still
-    # be a separate component the sweep can take whole.
-    trial = white_mask.copy()
-    _sweep_flag_remnants(trial, (x1, y1, x2, y2))
-    return trial, None
-
-
-# Start/finish bar geometry. TANGENT_SPAN is the arclength walked out along the
-# traced outline either side of the touch point before the chord between the two
-# is taken as the local direction of travel. The short end of that is set by how
-# much of the flag's leader line the detector's box fails to cover: whatever is
-# left behind is a spur welded to the outline right where the tangent is being
-# measured, and the walk has to reach well past it to out-vote it. Measured on a
-# 6px leftover, the error runs 41 degrees at a span of 6, 19 at 10, and settles
-# around 4-5 from 20 upwards. The long end is set by corner radius, and is much
-# more forgiving than it looks - the chord across a symmetric apex still points
-# the right way - with an 18px hairpin still inside a degree at a span of 40. 20
-# sits in the flat part of both. CROSS_SCAN caps how far the re-centring scan
-# travels across the stroke, so a scan that starts on the wrong pixel gives up
-# instead of wandering into the next straight over.
-TANGENT_SPAN_FRACTION = 0.025
-MIN_TANGENT_SPAN = 18.0
-CROSS_SCAN_FRACTION = 0.05
 
 
 RESAMPLE_STEP = 1.0
@@ -922,99 +736,281 @@ def _local_tangent(point, contours, span):
     return (pts[i][0], pts[i][1]), (tx / length, ty / length)
 
 
-def start_finish_svg(flag_line_box, flag_box, track_mask, contours, centroid,
-                     orig_w, orig_h, offset_x, offset_y,
-                     colour=START_FINISH_COLOUR, stroke_width=3.0):
-    """The start/finish bar and its label, drawn across the track at the flag.
+# ---------------------------------------------------------------------------
+# The white mask and the track band.
+#
+# statsf1 does not draw the track as a solid white stroke. On every map it is a
+# grey band (about 130 on the grey scale, 9-11px wide) fenced by two 1px white
+# edge lines, so thresholding at 200 keeps only those two hairlines - Zolder's
+# whole circuit is 12,000 white pixels. Anything that needs the track as an
+# area - the direction reading, the start/finish bar's width, the distance an
+# arrow is allowed to sit from the circuit - works on a *band* instead: the
+# mask closed with a kernel wider than the gap between the two edge lines,
+# which fills the band back in without touching anything else. The band is
+# never drawn; the SVG traces the edge lines, as it always has.
+WHITE_THRESHOLD = 200
+BAND_CLOSE_KERNEL = 15
+MIN_TRACK_COMPONENT_AREA = 3000
 
-    The touch point the detector returns lands on the *edge* of the stroke - it
-    is where the leader line runs into the track, not where the racing line
-    crosses - so a bar centred on it would sit half off the track. The distance
-    transform fixes that: scanning perpendicular to the tangent, the value rises
-    to a maximum on the ridge running down the middle of the stroke and falls
-    back to zero at the far edge, which gives the centre to draw about and, in
-    the same number, the half-width to draw out to. The scan stops the moment it
-    leaves white so it can only ever measure the one stroke it started on.
 
-    The label goes on the side the flag was on, which is by construction the
-    outside of the track at that point, so it cannot land in the infield on top
-    of a corner name.
+def white_mask_of(gray):
+    return ((gray > WHITE_THRESHOLD).astype(np.uint8)) * 255
+
+
+def track_band(white_mask):
+    """Solid track area: the white edge lines closed across the grey band.
+
+    Only components at least MIN_TRACK_COMPONENT_AREA survive. A corner name
+    closes into a blob of a few hundred pixels and the smallest circuit band
+    measured is 24,000, so the gap is wide.
     """
-    scale = max(orig_w, orig_h)
-    span = max(MIN_TANGENT_SPAN, TANGENT_SPAN_FRACTION * scale)
-    touch = box_centre(flag_line_box, orig_w, orig_h)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (BAND_CLOSE_KERNEL, BAND_CLOSE_KERNEL))
+    closed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+    band = np.zeros_like(white_mask)
+    for i in range(1, count):
+        if stats[i, cv2.CC_STAT_AREA] >= MIN_TRACK_COMPONENT_AREA:
+            band[labels == i] = 255
+    return band
 
-    tangent = _local_tangent(touch, contours, span)
-    if tangent is None:
-        return []
-    (qx, qy), (tx, ty) = tangent
-    nx, ny = -ty, tx                      # perpendicular to the direction of travel
 
-    dist = cv2.distanceTransform(track_mask, cv2.DIST_L2, 5)
-    img_h, img_w = track_mask.shape[:2]
-    max_scan = max(12.0, CROSS_SCAN_FRACTION * scale)
+def erase_box(mask, box, margin=0):
+    x1, y1, x2, y2 = box
+    cv2.rectangle(mask, (x1 - margin, y1 - margin), (x2 - 1 + margin, y2 - 1 + margin), 0, -1)
 
-    def scan(sign):
-        """Walk across the stroke, returning (offset, value) at the widest point."""
-        best_t, best_d, t = 0.0, 0.0, 0.0
-        while t <= max_scan:
-            xi = int(round(qx + sign * nx * t))
-            yi = int(round(qy + sign * ny * t))
-            if not (0 <= xi < img_w and 0 <= yi < img_h):
+
+def erase_components_in_box(mask, box, margin=0, touching_max_area=None):
+    """Wipe the white blobs that lie wholly inside `box` (grown by `margin`).
+
+    A plain rectangle erase is the wrong tool next to the track: an arrow or a
+    corner name drawn against the circuit has the track's edge line running
+    through its box, and cutting the rectangle out severs the loop - which is
+    what turned East London, Reims and Mosport anticlockwise. The edge lines
+    are thousands of pixels long and never fit inside a label's box, so
+    erasing only the components the box contains can take the glyphs and
+    leave the track whole.
+
+    With `touching_max_area` set, a blob no bigger than that which merely
+    overlaps the box goes too. The arrow's white outline needs this: the red
+    detector sees the solid head and misses the hairline shaft, so the
+    outline runs on past the box it was given - and left standing, that stub
+    closes into the band and puts a false edge right beside the arrow.
+    """
+    x1, y1, x2, y2 = box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    for i in range(1, count):
+        left, top = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+        right, bottom = left + stats[i, cv2.CC_STAT_WIDTH], top + stats[i, cv2.CC_STAT_HEIGHT]
+        inside = left >= x1 and top >= y1 and right <= x2 and bottom <= y2
+        overlaps = left < x2 and right > x1 and top < y2 and bottom > y1
+        small = touching_max_area is not None and stats[i, cv2.CC_STAT_AREA] <= touching_max_area
+        if inside or (overlaps and small):
+            mask[labels == i] = 0
+
+
+def erase_watermark(mask):
+    """Drop the www.statsf1.com watermark down the right edge of every map.
+
+    Only components lying wholly inside the strip go: the strip is narrower
+    than any circuit, so the track can never be one of them even where it runs
+    to the edge of the image (Baku).
+    """
+    height, width = mask.shape
+    erase_components_in_box(mask, (width - WATERMARK_MARGIN, 0, width, height))
+
+
+# ---------------------------------------------------------------------------
+# The chequered flag.
+#
+# statsf1 draws one flag glyph, pixel for pixel the same on every map: a 30x22
+# bordered chequer block. So it is found by template matching rather than by
+# asking a model for a box. assets/flag_template.png is that block, cut from
+# the Zolder map. Measured over all 157 cached maps the match scores at least
+# 0.75 (Hockenheim and Brands Hatch, where the flag sits against the left edge
+# of the image) and 0.99 elsewhere, while the best match anywhere that is NOT
+# the flag scores 0.61. The image is padded by a template's width first so a
+# flag cut off by the image edge still matches.
+FLAG_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "flag_template.png"
+FLAG_MATCH_THRESHOLD = 0.68
+_flag_template = None
+
+
+def flag_template():
+    global _flag_template
+    if _flag_template is None:
+        _flag_template = cv2.imread(str(FLAG_TEMPLATE_PATH), cv2.IMREAD_GRAYSCALE)
+        if _flag_template is None:
+            raise FileNotFoundError(f"Chequered flag template missing: {FLAG_TEMPLATE_PATH}")
+    return _flag_template
+
+
+def find_chequered_flag(gray):
+    """(score, (x1, y1, x2, y2)) of the flag glyph; the box is exclusive at x2, y2."""
+    template = flag_template()
+    th, tw = template.shape
+    padded = cv2.copyMakeBorder(gray, th, th, tw, tw, cv2.BORDER_CONSTANT, value=0)
+    result = cv2.matchTemplate(padded, template, cv2.TM_CCOEFF_NORMED)
+    _, score, _, (x, y) = cv2.minMaxLoc(result)
+    x, y = x - tw, y - th
+    return float(score), (x, y, x + tw, y + th)
+
+
+# ---------------------------------------------------------------------------
+# The leader line and the start/finish point.
+#
+# The line joining the flag to the track is always drawn the same way: a 45
+# degree diagonal, three pixels wide - white, black, white - whose black centre
+# starts ON the corner pixel of the flag box and runs straight into the track's
+# white edge line. That makes the start/finish point a pixel-exact reading:
+# walk the diagonal out of each corner, and the corner where the walk finds
+# dark centre pixels flanked by white ones is the leader; the first bright
+# pixel the walk reaches is where the leader meets the track. On 151 of the
+# 157 maps that signature is at least two pixels long; the other six (the
+# Hockenheim and Brands Hatch maps) have the flag jammed against the track and
+# the walk reaches the edge line within a few pixels regardless.
+LEADER_MAX_LENGTH = 60
+LEADER_DARK = 90
+LEADER_BRIGHT = 180
+LEADER_MIN_SIGNATURE = 2
+LEADER_GLUED_REACH = 8
+_CORNERS = (("tl", (0, 0), (-1, -1)), ("tr", (1, 0), (1, -1)),
+            ("bl", (0, 1), (-1, 1)), ("br", (1, 1), (1, 1)))
+
+
+def find_start_finish_touch(gray, flag_box):
+    """Where the flag's leader line meets the track.
+
+    Returns {"corner": (x, y), "direction": (dx, dy), "touch": (x, y),
+    "signature": n, "glued": bool} or None if no corner's diagonal reaches
+    anything bright within LEADER_MAX_LENGTH.
+    """
+    height, width = gray.shape
+    x1, y1, x2, y2 = flag_box
+    candidates = []
+    for _, (cx_sel, cy_sel), (dx, dy) in _CORNERS:
+        cx = x2 - 1 if cx_sel else x1
+        cy = y2 - 1 if cy_sel else y1
+        signature, touch = 0, None
+        for t in range(0, LEADER_MAX_LENGTH):
+            x, y = cx + dx * t, cy + dy * t
+            if not (0 <= x < width and 0 <= y < height):
                 break
-            d = float(dist[yi, xi])
-            if d <= 0.0 and t > 1.0:
+            value = int(gray[y, x])
+            if t > 0 and value > WHITE_THRESHOLD:
+                touch = (x, y)
                 break
-            if d > best_d:
-                best_d, best_t = d, t
-            t += 0.5
-        return best_t, best_d
-
-    (t_pos, d_pos), (t_neg, d_neg) = scan(1), scan(-1)
-    sign, offset, half_width = (1, t_pos, d_pos) if d_pos >= d_neg else (-1, t_neg, d_neg)
-    if half_width <= 0.0:
-        # Nothing white under the touch point - the box missed the track, and a
-        # bar drawn off a guessed width would be worse than no bar at all.
-        return []
-
-    cx = qx + sign * nx * offset
-    cy = qy + sign * ny * offset
-    overhang = max(MIN_START_FINISH_OVERHANG, START_FINISH_OVERHANG_FRACTION * scale)
-    reach = half_width + overhang          # overhang, so the bar reads as crossing
-
-    x1 = cx - nx * reach + offset_x
-    y1 = cy - ny * reach + offset_y
-    x2 = cx + nx * reach + offset_x
-    y2 = cy + ny * reach + offset_y
-
-    # Which end of the bar points away from the track: the flag's own side if it
-    # was found, otherwise simply away from the centre of the circuit.
-    if flag_box:
-        away = box_centre(flag_box, orig_w, orig_h)
-    elif centroid is not None:
-        away = (2 * cx - centroid[0], 2 * cy - centroid[1])
-    else:
-        away = None
-    label_sign = 1.0
-    if away is not None and (nx * (away[0] - cx) + ny * (away[1] - cy)) < 0:
-        label_sign = -1.0
-
-    label_gap = reach + 11.0
-    label_x = cx + label_sign * nx * label_gap + offset_x
-    label_y = cy + label_sign * ny * label_gap + offset_y
-
-    return [
-        f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-        f'stroke="{colour}" stroke-width="{stroke_width}" stroke-linecap="butt" />',
-        f'<g fill="{colour}" font-family="sans-serif" font-size="9" font-weight="bold" '
-        'paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">'
-        f'<text x="{label_x:.1f}" y="{label_y + 3.0:.1f}" text-anchor="middle">'
-        'START/FINISH</text></g>',
-    ]
+            fx, fy, gx, gy = x + dx, y, x, y + dy
+            if (value < LEADER_DARK and 0 <= fx < width and 0 <= gy < height
+                    and gray[fy, fx] > LEADER_BRIGHT and gray[gy, gx] > LEADER_BRIGHT):
+                signature += 1
+        if touch is not None:
+            reach = abs(touch[0] - cx)
+            candidates.append((signature, -reach, (cx, cy), (dx, dy), touch))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    signature, neg_reach, corner, direction, touch = candidates[0]
+    glued = signature < LEADER_MIN_SIGNATURE
+    if glued and -neg_reach > LEADER_GLUED_REACH:
+        return None
+    return {"corner": corner, "direction": direction, "touch": touch,
+            "signature": signature, "glued": glued}
 
 
-def generate_track_svg(image_path, grand_prix_dates=None):
-    SYSTEM_PROMPT_OCR="""
+def erase_flag_and_leader(mask, flag_box, leader):
+    """Take the flag glyph and its leader out of the white mask before tracing.
+
+    The leader is erased up to two pixels short of the touch point so the
+    track's own edge line is not notched where the bar will be drawn.
+    """
+    if leader is not None:
+        (cx, cy), (dx, dy), (tx, ty) = leader["corner"], leader["direction"], leader["touch"]
+        length = abs(tx - cx)
+        if length > 2:
+            end = (cx + dx * (length - 2), cy + dy * (length - 2))
+            cv2.line(mask, (cx, cy), end, 0, 5)
+    # With the leader gone the glyph is a handful of small components inside
+    # its own box, so they can be taken without touching the track - a plain
+    # rectangle with a margin cut 25px out of Monaco's pit straight. The exact
+    # box is then cleared as well, for a flag drawn hard against the track
+    # whose border shares a component with the edge line.
+    erase_components_in_box(mask, flag_box, margin=2)
+    erase_box(mask, flag_box, margin=0)
+
+
+# ---------------------------------------------------------------------------
+# Corner names and turn numbers: their glyphs, found on the mask so they can be
+# erased before the track is traced. What the labels say, and where they are
+# drawn, comes from the OCR model further down - these boxes are not read.
+#
+# Every label on a statsf1 map is white text of one size, so its glyphs are
+# the small white components - a few pixels to a few hundred, under 22px tall
+# - that the track's edge lines (thousands of pixels long) and the flag are
+# not. Gluing the glyphs of a line together horizontally gives one box per
+# line of text. The watermark down the right edge is dropped by position; the
+# arrow's white outline and the flag are dropped by the boxes passed in.
+TEXT_MAX_GLYPH_AREA = 600
+TEXT_GLYPH_MIN_HEIGHT = 3
+TEXT_GLYPH_MAX_HEIGHT = 22
+TEXT_GLYPH_MAX_WIDTH = 40
+TEXT_LINE_MIN_WIDTH = 6
+TEXT_LINE_MIN_HEIGHT = 6
+TEXT_LINE_MAX_HEIGHT = 26
+TEXT_GLUE_KERNEL = (3, 9)
+WATERMARK_MARGIN = 25
+
+
+def find_text_lines(white_mask, exclude_boxes=()):
+    """Boxes (x, y, w, h) of every line of text, in reading order, and the glyph mask.
+
+    A label printed against the track - Monaco's "Portier" - has letters
+    touching the edge line, and those letters are one component with the whole
+    circuit, so they are lost here and the label comes out short. Freeing them
+    was tried both ways (cutting the band's outline out of the mask, and
+    cutting the pixels beside the grey fill) and both did more harm than good,
+    eating labels the closing had bulged round.
+    """
+    height, width = white_mask.shape
+    work = white_mask.copy()
+    for box in exclude_boxes:
+        erase_box(work, box, margin=3)
+    work[:, max(0, width - WATERMARK_MARGIN):] = 0
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(work, 8)
+    glyphs = np.zeros_like(work)
+    for i in range(1, count):
+        area, w, h = stats[i, cv2.CC_STAT_AREA], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if (area <= TEXT_MAX_GLYPH_AREA and TEXT_GLYPH_MIN_HEIGHT <= h <= TEXT_GLYPH_MAX_HEIGHT
+                and w <= TEXT_GLYPH_MAX_WIDTH):
+            glyphs[labels == i] = 255
+
+    glued = cv2.dilate(glyphs, np.ones(TEXT_GLUE_KERNEL, np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(glued, 8)
+    boxes = []
+    for i in range(1, count):
+        x, y, w, h = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                      stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+        # the dilation grew the box by the kernel's reach on each side
+        x, w = x + TEXT_GLUE_KERNEL[1] // 2, w - (TEXT_GLUE_KERNEL[1] // 2) * 2
+        y, h = y + TEXT_GLUE_KERNEL[0] // 2, h - (TEXT_GLUE_KERNEL[0] // 2) * 2
+        if w >= TEXT_LINE_MIN_WIDTH and TEXT_LINE_MIN_HEIGHT <= h <= TEXT_LINE_MAX_HEIGHT:
+            boxes.append((int(x), int(y), int(w), int(h)))
+    boxes.sort(key=lambda b: (b[1] // 8, b[0]))
+    return boxes, glyphs
+
+
+# ---------------------------------------------------------------------------
+# Corner names and turn numbers: what they say and where, read off the whole
+# map by a VLM.
+#
+# The map is preprocessed first (see preprocess_for_ocr) so none of the aerial
+# photo underneath survives into what the model sees. qwen3-vl:4b reads it; if
+# that fails it is retried with a repeat penalty, and if that fails too
+# minicpm, which is less accurate but copes with far more context, gets it.
+OCR_MODELS = ("qwen3-vl:4b", "openbmb/minicpm-v4.6:1b")
+OCR_INPUT_PATH = "vlm_inference_ready.png"
+
+SYSTEM_PROMPT_OCR = """
     You are a strict OCR engine, specialising in Formula One circuit maps.
     You will be given an image of a Formula One circuit. This image will contain text or numbers (corner names and turn numbers).
     For each text item found, transcribe it verbatim and locate its exact 2D bounding box normalized to a 0-1000 coordinate grid system. Ignore all symbols such as the chequered flag or the arrow. Only text.
@@ -1029,8 +1025,8 @@ def generate_track_svg(image_path, grand_prix_dates=None):
         ...
     ]
     If there is no text in the image, return an empty JSON array: []
-    """    
-    SYSTEM_PROMPT_OCR_FALLBACK = """
+    """
+SYSTEM_PROMPT_OCR_FALLBACK = """
     You are a strict OCR engine, specialising in Formula One circuit maps.
     You will be given an image of a Formula One circuit containing text or numbers (corner names and turn numbers).
     For each text item found, transcribe it verbatim and locate its exact 2D bounding box normalized to a 0-1000 coordinate grid system. Ignore all symbols such as the chequered flag or the arrow. Only text.
@@ -1051,7 +1047,7 @@ def generate_track_svg(image_path, grand_prix_dates=None):
     ]
     """
 
-    OCR_SCHEMA = {
+OCR_SCHEMA = {
     "type": "array",
     "items": {
         "type": "object",
@@ -1067,110 +1063,18 @@ def generate_track_svg(image_path, grand_prix_dates=None):
         "required": ["text", "box_2d"],
         "additionalProperties": False
     }
-    }
-    SYSTEM_PROMPT_OBJECT_DETECTION = """
-    You are a deterministic, strict engine given the task of finding bounding boxes for specific parts of Formula One circuit maps.
-    You will be given an image of a Formula One circuit. This image will contain certain elements of the circuit, which you must locate and return as bounding boxes in a normalized 0-1000 coordinate grid system.
-    You will need to find the following elements in the image:
-    - The chequered flag: This is a black-and white chequered flag that indicates the start/finish line of the circuit.
-      You will need to find a) the bounding box encompassing the ENTIRE chequered flag region, from the line that extends from the flag and touches the track, to the end of the flag. Do not include any of the track in the bounding box, only the flag itself. 
-      and b) the bounding box for the small region where the line from the chequered flag touches the track. The small region that connects the chequered flag to the track is what you will have to return.
-    For each item found, return the exact 2D bounding box as you see it, in the format [xmin, ymin, xmax, ymax]. Ignore any text or numbers and do not attempt to transcribe them. Only return bounding boxes for the specified elements, and do not try to check its position in relation with any other element in the image.
-    Do not use an internal monologue or thinking process. Output the raw JSON text block directly without wrapped tags. Do not include blank characters or newlines in the output.
-    Do not repeat the same text in the output. Only output the text once with its bounding box.
-
-    Formatting Rules:
-    You MUST output your entire response as a single, valid JSON object. Do not include conversational text or markdown code wraps. Follow this exact schema:
-    {
-        "chequered_flag": [x_min, y_min, x_max, y_max],
-        "chequered_flag_line": [x_min, y_min, x_max, y_max]
-    }
-    """   
-    SYSTEM_PROMPT_OBJECT_DETECTION_FALLBACK = """
-    You are a deterministic, strict engine given the task of finding bounding boxes for specific parts of Formula One circuit maps.
-    You will be given an image of a Formula One circuit. This image will contain certain elements of the circuit, which you must locate and return as bounding boxes in a normalized 0-1000 coordinate grid system.
-    You will need to find the following elements in the image:
-    - The chequered flag: This is a black-and white chequered flag that indicates the start/finish line of the circuit.
-      You will need to find a) the bounding box encompassing the ENTIRE chequered flag region, from the line that extends from the flag and touches the track, to the end of the flag. Do not include any of the track in the bounding box, only the flag itself. 
-      and b) the bounding box for the small region where the line from the chequered flag touches the track. The small region that connects the chequered flag to the track is what you will have to return.
-    For each item found, return the exact 2D bounding box as you see it, in the format [xmin, ymin, xmax, ymax]. Ignore any text or numbers and do not attempt to transcribe them. Only return bounding boxes for the specified elements, and do not try to check its position in relation with any other element in the image.
-    Do not use an internal monologue or thinking process. Output the raw JSON text block directly without wrapped tags. Do not include blank characters or newlines in the output.
-    Do not repeat the same text in the output. Only output the text once with its bounding box.
-
-    Formatting Rules:
-    You MUST output your entire response as a single, valid JSON object. Do not include conversational text or markdown code wraps. Follow this exact schema:
-    {
-        "chequered_flag": [x_min, y_min, x_max, y_max],
-        "chequered_flag_line": [x_min, y_min, x_max, y_max]
-    }
-    - The bounding box MUST contain exactly 4 integers ordered exactly as: [xmin, ymin, xmax, ymax].
-    - Do not output native XML tags like <box>. Instead, map those integer bins directly into the values of the JSON object.
-    """       
-    OBJECT_DETECTION_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "chequered_flag": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-            "chequered_flag_line": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        },
-        "required": [
-            "chequered_flag",
-            "chequered_flag_line",
-        ],
-        "additionalProperties": False,
-    }
-    if image_path == "https://www.statsf1.com/images/GetImage.ashx?id=piste.avus":
-        #this was so hard, so i hardcoded it.
-        return """
-            <svg width="1020" height="500" viewBox="0 0 1020 454" xmlns="http://www.w3.org/2000/svg" style="background: #111;" xmlns:c2pa="http://c2pa.org/manifest"><metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTo1MzIwOGIwZC01NzE1LTQwODItYmU3Zi1jOTQ1N2Y5YjdhMmYAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaGe0Ica2QXmMWrzjSIwWi30AAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDpkYzgzN2EyNy00YWEzLTRkYTYtOWIwOS0xOWRhMzg0MjZjZGVscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNoc6mYB4Z6lX6eksLDLvcSAgAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggedgXgm02XZnxtAgtnbNQOqQrXj166mfmZzevLHLRds2kZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaMZUTFdYQ3R15pRqU2ABCxMAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRNAAAAAAAAAAAAAAAAAGRoYXNoWCCb9sw9WKhkk5Z+CDPHK+9c1/zMxFYlv/fVUBPtwGQolmRuYW1lbmp1bWJmIG1hbmlmZXN0amV4Y2x1c2lvbnOBomVzdGFydBiyZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjUzMjA4YjBkLTU3MTUtNDA4Mi1iZTdmLWM5NDU3ZjliN2EyZi9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOjE0MmU4MzAwLWRiZDUtNGZmOC04MjMwLTcyMjA3ZTNmODE5MHJjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCB52BeCbTZdmfG0CC2ds1A6pCtePXrqZ+ZnN68sctF2zaJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFgggcfH2Wk4HNkAB+040HtLXTkgtQjc9OZIItx+cSyBCsCiY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFggtFYRme5NH0f/gzxX9k/CSBus/yrC1PHGAKswuEfr3NN0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQGId/E+0nF99Au0tbu326NQ4FXIIBXim0KWcG1B+d036Ay928DxKCkjCUKJ2BXS1Ksy1hvXDzh4RnfhZQGHhq7o=</c2pa:manifest></metadata>
-            <polyline points="766,32 770,36 769,37 768,37 767,38 766,38 765,39 764,39 763,40 761,40 760,41 759,41 758,42 757,42 756,43 754,43 753,44 752,44 751,45 750,45 749,46 748,46 747,47 745,47 744,48 743,48 742,49 741,49 740,50 739,50 738,51 736,51 735,52 734,52 733,53 732,53 731,54 729,54 728,55 727,55 726,56 725,56 724,57 722,57 721,58 720,58 719,59 718,59 717,60 716,60 715,61 713,61 712,62 711,62 710,63 709,63 708,64 707,64 706,65 704,65 703,66 702,66 701,67 699,67 698,68 697,68 696,69 695,69 694,70 693,70 692,71 690,71 689,72 688,72 687,73 686,73 685,74 683,74 682,75 681,75 680,76 679,76 678,77 677,77 676,78 674,78 673,79 672,79 671,80 670,80 669,81 667,81 666,82 665,82 664,83 663,83 662,84 660,84 659,85 658,85 657,86 656,86 655,87 654,87 653,88 651,88 650,89 649,89 648,90 647,90 646,91 644,91 643,92 642,92 641,93 640,93 639,94 637,94 636,95 635,95 634,96 633,96 632,97 631,97 630,98 628,98 627,99 626,99 625,100 624,100 623,101 621,101 620,102 619,102 618,103 616,103 615,104 614,104 613,105 612,105 611,106 610,106 609,107 607,107 606,108 605,108 604,109 603,109 602,110 601,110 600,111 598,111 597,112 596,112 595,113 594,113 593,114 591,114 590,115 589,115 588,116 587,116 586,117 584,117 583,118 582,118 581,119 580,119 579,120 578,120 577,121 575,121 574,122 573,122 572,123 570,123 568,125 566,125 565,126 564,126 563,127 561,127 560,128 559,128 558,129 557,129 556,130 554,130 553,131 552,131 551,132 550,132 549,133 548,133 547,134 546,134 545,135 543,135 542,136 540,136 539,137 538,137 537,138 536,138 535,139 534,139 533,140 531,140 530,141 529,141 528,142 527,142 526,143 525,143 524,144 522,144 521,145 520,145 519,146 518,146 517,147 515,147 514,148 513,148 512,149 511,149 510,150 509,150 508,151 506,151 505,152 504,152 503,153 502,153 501,154 499,154 498,155 497,155 496,156 495,156 494,157 492,157 491,158 490,158 489,159 488,159 487,160 486,160 485,161 483,161 482,162 481,162 480,163 479,163 478,164 476,164 475,165 474,165 473,166 472,166 471,167 469,167 468,168 467,168 466,169 465,169 464,170 463,170 462,171 460,171 459,172 458,172 457,173 456,173 455,174 454,174 453,175 451,175 450,176 449,176 448,177 447,177 446,178 444,178 443,179 442,179 441,180 440,180 439,181 438,181 437,182 435,182 434,183 433,183 432,184 431,184 430,185 429,185 428,186 426,186 425,187 424,187 423,188 422,188 421,189 419,189 418,190 417,190 416,191 415,191 414,192 413,192 412,193 410,193 409,194 408,194 407,195 406,195 405,196 404,196 403,197 402,197 401,198 399,198 398,199 397,199 396,200 395,200 394,201 392,201 391,202 390,202 389,203 388,203 387,204 385,204 384,205 383,205 382,206 381,206 380,207 379,207 378,208 377,208 376,209 374,209 373,210 372,210 371,211 369,211 368,212 367,212 366,213 365,213 364,214 363,214 362,215 361,215 360,216 358,216 357,217 356,217 355,218 354,218 353,219 351,219 350,220 349,220 348,221 347,221 346,222 345,222 344,223 342,223 341,224 340,224 339,225 338,225 337,226 335,226 334,227 333,227 332,228 331,228 330,229 329,229 328,230 327,230 326,231 324,231 323,232 322,232 321,233 320,233 319,234 318,234 317,235 315,235 314,236 313,236 312,237 311,237 310,238 308,238 307,239 306,239 305,240 304,240 303,241 302,241 301,242 299,242 298,243 297,243 296,244 295,244 294,245 293,245 292,246 290,246 289,247 288,247 287,248 286,248 285,249 284,249 283,250 281,250 280,251 279,251 278,252 277,252 276,253 275,253 274,254 272,254 271,255 270,255 269,256 268,256 267,257 266,257 265,258 263,258 262,259 261,259 260,260 259,260 258,261 256,261 255,262 254,262 253,263 252,263 251,264 250,264 249,265 247,265 246,266 245,266 244,267 243,267 242,268 241,268 240,269 238,269 237,270 236,270 235,271 234,271 233,272 231,272 230,273 229,273 228,274 227,274 226,275 225,275 224,276 223,276 222,277 220,277 219,278 218,278 217,279 216,279 215,280 214,280 213,281 212,281 211,282 210,282 209,283 208,283 207,284 206,284 205,285 204,285 203,286 202,286 201,287 200,287 199,288 198,288 197,289 196,289 195,290 194,290 193,291 192,291 191,292 189,292 188,293 187,293 186,294 185,294 184,295 183,295 182,296 181,296 180,297 179,297 178,298 177,298 176,299 175,299 174,300 173,300 172,301 171,301 170,302 169,302 168,303 167,303 166,304 165,304 164,305 163,305 162,306 161,306 160,307 159,307 158,308 157,308 156,309 154,309 153,310 152,310 151,311 150,311 149,312 148,312 147,313 146,313 145,314 144,314 143,315 142,315 141,316 140,316 139,317 138,317 137,318 136,318 135,319 134,319 133,320 132,320 131,321 130,321 129,322 128,322 127,323 126,323 125,324 123,324 122,325 121,325 120,326 119,326 118,327 117,327 116,328 115,328 114,329 113,329 112,330 111,330 110,331 109,331 108,332 107,332 106,333 105,333 104,334 103,334 102,335 101,335 100,336 99,336 98,337 97,337 96,338 95,338 94,339 93,339 92,340 91,340 90,341 89,341 88,342 87,342 86,343 84,343 83,344 82,344 81,345 80,345 79,346 78,346 77,347 76,347 75,348 74,348 73,349 72,349 71,350 70,350 69,351 68,351 67,352 66,352 65,353 64,353 63,354 62,354 61,355 60,355 59,356 58,356 57,357 55,357 54,358 53,358 52,359 50,359 49,360 47,360 46,361 44,361 43,362 41,362 40,363 37,363 36,364 34,364 33,365 32,365 31,366 29,366 28,367 26,367 24,369 23,369 22,370 21,370 19,372 19,373 18,374 18,381 19,382 19,383 20,384 20,385 21,385 22,386 24,386 25,387 38,387 39,386 42,386 43,385 44,385 45,384 46,384 47,383 48,383 49,382 50,382 51,381 52,381 53,380 54,380 55,379 56,379 57,378 58,378 59,377 60,377 61,376 62,376 63,375 65,375 66,374 67,374 68,373 69,373 70,372 71,372 72,371 73,371 74,370 75,370 76,369 77,369 78,368 79,368 80,367 81,367 82,366 83,366 84,365 85,365 86,364 87,364 88,363 89,363 90,362 91,362 92,361 93,361 94,360 95,360 96,359 97,359 98,358 99,358 100,357 101,357 102,356 103,356 104,355 106,355 107,354 108,354 109,353 110,353 111,352 112,352 113,351 114,351 115,350 116,350 117,349 118,349 119,348 120,348 121,347 122,347 123,346 124,346 125,345 126,345 127,344 128,344 129,343 130,343 131,342 132,342 133,341 134,341 135,340 136,340 137,339 138,339 139,338 140,338 141,337 142,337 143,336 144,336 145,335 147,335 148,334 149,334 150,333 151,333 152,332 153,332 154,331 155,331 156,330 157,330 158,329 159,329 160,328 161,328 162,327 163,327 164,326 165,326 166,325 167,325 168,324 169,324 170,323 171,323 172,322 173,322 174,321 175,321 176,320 177,320 178,319 179,319 180,318 181,318 182,317 184,317 186,315 188,315 189,314 190,314 191,313 192,313 193,312 194,312 195,311 196,311 197,310 198,310 199,309 200,309 201,308 202,308 203,307 204,307 205,306 206,306 207,305 208,305 209,304 210,304 211,303 212,303 213,302 214,302 215,301 216,301 217,300 218,300 219,299 220,299 221,298 222,298 223,297 224,297 225,296 226,296 227,295 228,295 229,294 230,294 231,293 233,293 234,292 235,292 236,291 237,291 238,290 239,290 240,289 242,289 243,288 244,288 245,287 246,287 247,286 249,286 250,285 251,285 252,284 253,284 254,283 255,283 256,282 258,282 259,281 260,281 261,280 262,280 263,279 264,279 265,278 267,278 268,277 269,277 270,276 271,276 272,275 274,275 275,274 276,274 277,273 278,273 279,272 280,272 281,271 283,271 284,270 285,270 286,269 287,269 288,268 290,268 291,267 292,267 293,266 294,266 295,265 297,265 298,264 299,264 300,263 301,263 302,262 304,262 305,261 306,261 307,260 308,260 309,259 310,259 311,258 313,258 314,257 315,257 316,256 317,256 318,255 320,255 321,254 322,254 323,253 324,253 325,252 327,252 328,251 329,251 330,250 331,250 332,249 333,249 334,248 336,248 337,247 338,247 339,246 340,246 341,245 343,245 344,244 345,244 346,243 347,243 348,242 349,242 350,241 352,241 353,240 354,240 355,239 356,239 357,238 358,238 359,237 361,237 362,236 363,236 364,235 366,235 367,234 368,234 369,233 370,233 371,232 372,232 373,231 375,231 376,230 377,230 378,229 379,229 380,228 381,228 382,227 384,227 385,226 386,226 387,225 388,225 389,224 391,224 392,223 393,223 394,222 395,222 396,221 397,221 398,220 400,220 401,219 402,219 403,218 404,218 405,217 406,217 407,216 409,216 410,215 411,215 412,214 413,214 414,213 416,213 417,212 418,212 419,211 420,211 421,210 423,210 424,209 425,209 426,208 427,208 428,207 429,207 430,206 432,206 433,205 434,205 435,204 436,204 437,203 439,203 440,202 441,202 442,201 443,201 444,200 445,200 446,199 448,199 449,198 450,198 451,197 452,197 453,196 455,196 456,195 457,195 458,194 459,194 460,193 462,193 463,192 464,192 465,191 466,191 467,190 468,190 469,189 471,189 472,188 473,188 474,187 475,187 476,186 477,186 478,185 480,185 481,184 482,184 483,183 484,183 485,182 487,182 488,181 489,181 490,180 491,180 492,179 494,179 495,178 496,178 497,177 498,177 499,176 500,176 501,175 503,175 504,174 505,174 506,173 507,173 508,172 510,172 511,171 512,171 513,170 515,170 516,169 517,169 518,168 519,168 520,167 521,167 522,166 524,166 525,165 526,165 527,164 529,164 530,163 531,163 532,162 533,162 534,161 536,161 537,160 538,160 539,159 540,159 541,158 543,158 544,157 545,157 546,156 547,156 548,155 550,155 551,154 552,154 553,153 554,153 555,152 556,152 557,151 558,151 559,150 561,150 562,149 563,149 564,148 566,148 567,147 568,147 569,146 570,146 571,145 572,145 573,144 575,144 576,143 577,143 578,142 579,142 580,141 582,141 583,140 584,140 585,139 586,139 587,138 588,138 589,137 591,137 592,136 593,136 594,135 595,135 596,134 597,134 598,133 600,133 601,132 602,132 603,131 605,131 606,130 607,130 608,129 609,129 610,128 611,128 612,127 614,127 615,126 616,126 617,125 618,125 619,124 621,124 622,123 623,123 624,122 625,122 626,121 628,121 629,120 630,120 631,119 632,119 633,118 635,118 636,117 637,117 638,116 639,116 640,115 642,115 643,114 644,114 645,113 646,113 647,112 648,112 649,111 651,111 652,110 653,110 654,109 655,109 656,108 658,108 659,107 660,107 661,106 662,106 663,105 665,105 666,104 667,104 668,103 669,103 670,102 672,102 673,101 674,101 675,100 676,100 677,99 678,99 679,98 681,98 682,97 683,97 684,96 686,96 687,95 688,95 689,94 690,94 691,93 692,93 693,92 694,92 695,91 697,91 698,90 699,90 700,89 701,89 702,88 704,88 705,87 706,87 707,86 709,86 710,85 711,85 712,84 713,84 714,83 715,83 716,82 718,82 719,81 720,81 721,80 722,80 723,79 725,79 726,78 727,78 728,77 729,77 730,76 732,76 733,75 734,75 735,74 736,74 737,73 739,73 740,72 741,72 742,71 743,71 744,70 745,70 746,69 748,69 749,68 750,68 751,67 752,67 753,66 755,66 756,65 757,65 758,64 759,64 760,63 761,63 762,62 764,62 765,61 766,61 767,60 769,60 770,59 771,59 772,58 773,58 774,57 775,57 776,56 779,56 780,55 783,55 784,54 787,54 788,53 791,53 792,52 797,52 798,53 799,52 804,52 805,53 809,53 810,54 814,54 815,55 818,55 819,56 821,56 822,57 824,57 825,58 828,58 829,59 831,59 832,60 834,60 835,61 837,61 838,62 840,62 841,63 843,63 844,64 847,64 848,65 850,65 851,66 855,66 856,67 869,67 870,66 872,66 875,63 876,63 878,61 878,60 879,59 879,58 881,56 881,53 882,52 882,40 881,39 881,38 880,37 880,36 879,35 879,34 878,33 878,32 872,26 871,26 868,23 867,23 866,22 864,22 863,21 860,21 859,20 833,20 832,21 826,21 825,22 820,22 819,23 814,23 813,24 810,24 809,25 806,25 805,26 803,26 802,27 798,27 797,28 795,28 794,29 792,29 791,30 788,30 787,31 785,31 784,32 783,32 782,33 780,33 779,34 776,34 775,35 773,35 772,36" fill="none" stroke="white" stroke-width="9" stroke-linejoin="round" stroke-linecap="round"></polyline>
-            <polyline points="766,32 770,36 769,37 768,37 767,38 766,38 765,39 764,39 763,40 761,40 760,41 759,41 758,42 757,42 756,43 754,43 753,44 752,44 751,45 750,45 749,46 748,46 747,47 745,47 744,48 743,48 742,49 741,49 740,50 739,50 738,51 736,51 735,52 734,52 733,53 732,53 731,54 729,54 728,55 727,55 726,56 725,56 724,57 722,57 721,58 720,58 719,59 718,59 717,60 716,60 715,61 713,61 712,62 711,62 710,63 709,63 708,64 707,64 706,65 704,65 703,66 702,66 701,67 699,67 698,68 697,68 696,69 695,69 694,70 693,70 692,71 690,71 689,72 688,72 687,73 686,73 685,74 683,74 682,75 681,75 680,76 679,76 678,77 677,77 676,78 674,78 673,79 672,79 671,80 670,80 669,81 667,81 666,82 665,82 664,83 663,83 662,84 660,84 659,85 658,85 657,86 656,86 655,87 654,87 653,88 651,88 650,89 649,89 648,90 647,90 646,91 644,91 643,92 642,92 641,93 640,93 639,94 637,94 636,95 635,95 634,96 633,96 632,97 631,97 630,98 628,98 627,99 626,99 625,100 624,100 623,101 621,101 620,102 619,102 618,103 616,103 615,104 614,104 613,105 612,105 611,106 610,106 609,107 607,107 606,108 605,108 604,109 603,109 602,110 601,110 600,111 598,111 597,112 596,112 595,113 594,113 593,114 591,114 590,115 589,115 588,116 587,116 586,117 584,117 583,118 582,118 581,119 580,119 579,120 578,120 577,121 575,121 574,122 573,122 572,123 570,123 568,125 566,125 565,126 564,126 563,127 561,127 560,128 559,128 558,129 557,129 556,130 554,130 553,131 552,131 551,132 550,132 549,133 548,133 547,134 546,134 545,135 543,135 542,136 540,136 539,137 538,137 537,138 536,138 535,139 534,139 533,140 531,140 530,141 529,141 528,142 527,142 526,143 525,143 524,144 522,144 521,145 520,145 519,146 518,146 517,147 515,147 514,148 513,148 512,149 511,149 510,150 509,150 508,151 506,151 505,152 504,152 503,153 502,153 501,154 499,154 498,155 497,155 496,156 495,156 494,157 492,157 491,158 490,158 489,159 488,159 487,160 486,160 485,161 483,161 482,162 481,162 480,163 479,163 478,164 476,164 475,165 474,165 473,166 472,166 471,167 469,167 468,168 467,168 466,169 465,169 464,170 463,170 462,171 460,171 459,172 458,172 457,173 456,173 455,174 454,174 453,175 451,175 450,176 449,176 448,177 447,177 446,178 444,178 443,179 442,179 441,180 440,180 439,181 438,181 437,182 435,182 434,183 433,183 432,184 431,184 430,185 429,185 428,186 426,186 425,187 424,187 423,188 422,188 421,189 419,189 418,190 417,190 416,191 415,191 414,192 413,192 412,193 410,193 409,194 408,194 407,195 406,195 405,196 404,196 403,197 402,197 401,198 399,198 398,199 397,199 396,200 395,200 394,201 392,201 391,202 390,202 389,203 388,203 387,204 385,204 384,205 383,205 382,206 381,206 380,207 379,207 378,208 377,208 376,209 374,209 373,210 372,210 371,211 369,211 368,212 367,212 366,213 365,213 364,214 363,214 362,215 361,215 360,216 358,216 357,217 356,217 355,218 354,218 353,219 351,219 350,220 349,220 348,221 347,221 346,222 345,222 344,223 342,223 341,224 340,224 339,225 338,225 337,226 335,226 334,227 333,227 332,228 331,228 330,229 329,229 328,230 327,230 326,231 324,231 323,232 322,232 321,233 320,233 319,234 318,234 317,235 315,235 314,236 313,236 312,237 311,237 310,238 308,238 307,239 306,239 305,240 304,240 303,241 302,241 301,242 299,242 298,243 297,243 296,244 295,244 294,245 293,245 292,246 290,246 289,247 288,247 287,248 286,248 285,249 284,249 283,250 281,250 280,251 279,251 278,252 277,252 276,253 275,253 274,254 272,254 271,255 270,255 269,256 268,256 267,257 266,257 265,258 263,258 262,259 261,259 260,260 259,260 258,261 256,261 255,262 254,262 253,263 252,263 251,264 250,264 249,265 247,265 246,266 245,266 244,267 243,267 242,268 241,268 240,269 238,269 237,270 236,270 235,271 234,271 233,272 231,272 230,273 229,273 228,274 227,274 226,275 225,275 224,276 223,276 222,277 220,277 219,278 218,278 217,279 216,279 215,280 214,280 213,281 212,281 211,282 210,282 209,283 208,283 207,284 206,284 205,285 204,285 203,286 202,286 201,287 200,287 199,288 198,288 197,289 196,289 195,290 194,290 193,291 192,291 191,292 189,292 188,293 187,293 186,294 185,294 184,295 183,295 182,296 181,296 180,297 179,297 178,298 177,298 176,299 175,299 174,300 173,300 172,301 171,301 170,302 169,302 168,303 167,303 166,304 165,304 164,305 163,305 162,306 161,306 160,307 159,307 158,308 157,308 156,309 154,309 153,310 152,310 151,311 150,311 149,312 148,312 147,313 146,313 145,314 144,314 143,315 142,315 141,316 140,316 139,317 138,317 137,318 136,318 135,319 134,319 133,320 132,320 131,321 130,321 129,322 128,322 127,323 126,323 125,324 123,324 122,325 121,325 120,326 119,326 118,327 117,327 116,328 115,328 114,329 113,329 112,330 111,330 110,331 109,331 108,332 107,332 106,333 105,333 104,334 103,334 102,335 101,335 100,336 99,336 98,337 97,337 96,338 95,338 94,339 93,339 92,340 91,340 90,341 89,341 88,342 87,342 86,343 84,343 83,344 82,344 81,345 80,345 79,346 78,346 77,347 76,347 75,348 74,348 73,349 72,349 71,350 70,350 69,351 68,351 67,352 66,352 65,353 64,353 63,354 62,354 61,355 60,355 59,356 58,356 57,357 55,357 54,358 53,358 52,359 50,359 49,360 47,360 46,361 44,361 43,362 41,362 40,363 37,363 36,364 34,364 33,365 32,365 31,366 29,366 28,367 26,367 24,369 23,369 22,370 21,370 19,372 19,373 18,374 18,381 19,382 19,383 20,384 20,385 21,385 22,386 24,386 25,387 38,387 39,386 42,386 43,385 44,385 45,384 46,384 47,383 48,383 49,382 50,382 51,381 52,381 53,380 54,380 55,379 56,379 57,378 58,378 59,377 60,377 61,376 62,376 63,375 65,375 66,374 67,374 68,373 69,373 70,372 71,372 72,371 73,371 74,370 75,370 76,369 77,369 78,368 79,368 80,367 81,367 82,366 83,366 84,365 85,365 86,364 87,364 88,363 89,363 90,362 91,362 92,361 93,361 94,360 95,360 96,359 97,359 98,358 99,358 100,357 101,357 102,356 103,356 104,355 106,355 107,354 108,354 109,353 110,353 111,352 112,352 113,351 114,351 115,350 116,350 117,349 118,349 119,348 120,348 121,347 122,347 123,346 124,346 125,345 126,345 127,344 128,344 129,343 130,343 131,342 132,342 133,341 134,341 135,340 136,340 137,339 138,339 139,338 140,338 141,337 142,337 143,336 144,336 145,335 147,335 148,334 149,334 150,333 151,333 152,332 153,332 154,331 155,331 156,330 157,330 158,329 159,329 160,328 161,328 162,327 163,327 164,326 165,326 166,325 167,325 168,324 169,324 170,323 171,323 172,322 173,322 174,321 175,321 176,320 177,320 178,319 179,319 180,318 181,318 182,317 184,317 186,315 188,315 189,314 190,314 191,313 192,313 193,312 194,312 195,311 196,311 197,310 198,310 199,309 200,309 201,308 202,308 203,307 204,307 205,306 206,306 207,305 208,305 209,304 210,304 211,303 212,303 213,302 214,302 215,301 216,301 217,300 218,300 219,299 220,299 221,298 222,298 223,297 224,297 225,296 226,296 227,295 228,295 229,294 230,294 231,293 233,293 234,292 235,292 236,291 237,291 238,290 239,290 240,289 242,289 243,288 244,288 245,287 246,287 247,286 249,286 250,285 251,285 252,284 253,284 254,283 255,283 256,282 258,282 259,281 260,281 261,280 262,280 263,279 264,279 265,278 267,278 268,277 269,277 270,276 271,276 272,275 274,275 275,274 276,274 277,273 278,273 279,272 280,272 281,271 283,271 284,270 285,270 286,269 287,269 288,268 290,268 291,267 292,267 293,266 294,266 295,265 297,265 298,264 299,264 300,263 301,263 302,262 304,262 305,261 306,261 307,260 308,260 309,259 310,259 311,258 313,258 314,257 315,257 316,256 317,256 318,255 320,255 321,254 322,254 323,253 324,253 325,252 327,252 328,251 329,251 330,250 331,250 332,249 333,249 334,248 336,248 337,247 338,247 339,246 340,246 341,245 343,245 344,244 345,244 346,243 347,243 348,242 349,242 350,241 352,241 353,240 354,240 355,239 356,239 357,238 358,238 359,237 361,237 362,236 363,236 364,235 366,235 367,234 368,234 369,233 370,233 371,232 372,232 373,231 375,231 376,230 377,230 378,229 379,229 380,228 381,228 382,227 384,227 385,226 386,226 387,225 388,225 389,224 391,224 392,223 393,223 394,222 395,222 396,221 397,221 398,220 400,220 401,219 402,219 403,218 404,218 405,217 406,217 407,216 409,216 410,215 411,215 412,214 413,214 414,213 416,213 417,212 418,212 419,211 420,211 421,210 423,210 424,209 425,209 426,208 427,208 428,207 429,207 430,206 432,206 433,205 434,205 435,204 436,204 437,203 439,203 440,202 441,202 442,201 443,201 444,200 445,200 446,199 448,199 449,198 450,198 451,197 452,197 453,196 455,196 456,195 457,195 458,194 459,194 460,193 462,193 463,192 464,192 465,191 466,191 467,190 468,190 469,189 471,189 472,188 473,188 474,187 475,187 476,186 477,186 478,185 480,185 481,184 482,184 483,183 484,183 485,182 487,182 488,181 489,181 490,180 491,180 492,179 494,179 495,178 496,178 497,177 498,177 499,176 500,176 501,175 503,175 504,174 505,174 506,173 507,173 508,172 510,172 511,171 512,171 513,170 515,170 516,169 517,169 518,168 519,168 520,167 521,167 522,166 524,166 525,165 526,165 527,164 529,164 530,163 531,163 532,162 533,162 534,161 536,161 537,160 538,160 539,159 540,159 541,158 543,158 544,157 545,157 546,156 547,156 548,155 550,155 551,154 552,154 553,153 554,153 555,152 556,152 557,151 558,151 559,150 561,150 562,149 563,149 564,148 566,148 567,147 568,147 569,146 570,146 571,145 572,145 573,144 575,144 576,143 577,143 578,142 579,142 580,141 582,141 583,140 584,140 585,139 586,139 587,138 588,138 589,137 591,137 592,136 593,136 594,135 595,135 596,134 597,134 598,133 600,133 601,132 602,132 603,131 605,131 606,130 607,130 608,129 609,129 610,128 611,128 612,127 614,127 615,126 616,126 617,125 618,125 619,124 621,124 622,123 623,123 624,122 625,122 626,121 628,121 629,120 630,120 631,119 632,119 633,118 635,118 636,117 637,117 638,116 639,116 640,115 642,115 643,114 644,114 645,113 646,113 647,112 648,112 649,111 651,111 652,110 653,110 654,109 655,109 656,108 658,108 659,107 660,107 661,106 662,106 663,105 665,105 666,104 667,104 668,103 669,103 670,102 672,102 673,101 674,101 675,100 676,100 677,99 678,99 679,98 681,98 682,97 683,97 684,96 686,96 687,95 688,95 689,94 690,94 691,93 692,93 693,92 694,92 695,91 697,91 698,90 699,90 700,89 701,89 702,88 704,88 705,87 706,87 707,86 709,86 710,85 711,85 712,84 713,84 714,83 715,83 716,82 718,82 719,81 720,81 721,80 722,80 723,79 725,79 726,78 727,78 728,77 729,77 730,76 732,76 733,75 734,75 735,74 736,74 737,73 739,73 740,72 741,72 742,71 743,71 744,70 745,70 746,69 748,69 749,68 750,68 751,67 752,67 753,66 755,66 756,65 757,65 758,64 759,64 760,63 761,63 762,62 764,62 765,61 766,61 767,60 769,60 770,59 771,59 772,58 773,58 774,57 775,57 776,56 779,56 780,55 783,55 784,54 787,54 788,53 791,53 792,52 797,52 798,53 799,52 804,52 805,53 809,53 810,54 814,54 815,55 818,55 819,56 821,56 822,57 824,57 825,58 828,58 829,59 831,59 832,60 834,60 835,61 837,61 838,62 840,62 841,63 843,63 844,64 847,64 848,65 850,65 851,66 855,66 856,67 869,67 870,66 872,66 875,63 876,63 878,61 878,60 879,59 879,58 881,56 881,53 882,52 882,40 881,39 881,38 880,37 880,36 879,35 879,34 878,33 878,32 872,26 871,26 868,23 867,23 866,22 864,22 863,21 860,21 859,20 833,20 832,21 826,21 825,22 820,22 819,23 814,23 813,24 810,24 809,25 806,25 805,26 803,26 802,27 798,27 797,28 795,28 794,29 792,29 791,30 788,30 787,31 785,31 784,32 783,32 782,33 780,33 779,34 776,34 775,35 773,35 772,36" fill="none" stroke="#111111" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"></polyline>
-            <line x1="762.7" y1="29.8" x2="775.3" y2="38.2" stroke="#FFD200" stroke-width="3.0" stroke-linecap="butt" />
-            <g fill="#FFD200" font-family="sans-serif" font-size="9" font-weight="bold" paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round"><text x="779.0" y="19.0" text-anchor="middle">START/FINISH</text></g>
-            <line x1="745.7" y1="21.5" x2="734.5" y2="25.9" stroke="#E10600" stroke-width="3.0" stroke-linecap="round" />
-            <polygon points="727.1,28.9 733.0,22.2 736.0,29.7" fill="#E10600" />
-            <g fill="#FFFFFF" font-family="sans-serif" font-size="12" font-weight="bold" paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">
-            <text x="850" y="0">Nordschleife</text>
-            <text x="0" y="420">Sudkehre</text>
-            </g>
-            </svg>
-        """, "Anticlockwise"
-    for i in range(4):
-        img, _ = imread_from_url(image_path)
-
-        if img is not None:
-            break
-
-        if i == 3:
-            raise ValueError(f"Failed to read image from URL: {image_path}")
+}
 
 
-    orig_h, orig_w = img.shape[:2]
-    h = orig_h + 50
-    w = orig_w + 100
-    svg_elements = []
-    # 1. Track outline (white / grey)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, white_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+def preprocess_for_ocr(bgr):
+    """The image the OCR model reads. The SVG mask is never touched by this.
 
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(rgb_img)
-    pil_img_p2 = pil_img.copy() #this is for the second pass, for the arrow and the start/finish line
-    #leaving it here and continuing after the first pass is done...
-
-    # Keep the original SVG mask untouched. This is a separate VLM/OCR image only.
-    # GIMP-max-contrast pass: hard cut at native resolution first, so none of the
-    # aerial photo underneath can survive into the upscale, then enlarge and
-    # re-binarise to strip the grey LANCZOS ringing off the stroke edges.
+    GIMP-max-contrast pass: hard cut at native resolution first, so none of the
+    aerial photo underneath can survive into the upscale, then enlarge and
+    re-binarise to strip the grey LANCZOS ringing off the stroke edges.
+    """
+    orig_h, orig_w = bgr.shape[:2]
+    pil_img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     pil_img_for_vlm = pil_img.convert("L")
     pil_img_for_vlm = gimp_contrast(pil_img_for_vlm, contrast=1.0, pivot=200)
     pil_img_for_vlm = pil_img_for_vlm.resize(
@@ -1181,28 +1085,35 @@ def generate_track_svg(image_path, grand_prix_dates=None):
     # Close the hairline gaps the hard threshold leaves in thin glyph strokes.
     vlm_arr = np.asarray(pil_img_for_vlm, dtype=np.uint8)
     vlm_arr = cv2.morphologyEx(vlm_arr, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    pil_img_for_vlm = Image.fromarray(vlm_arr)
+    return Image.fromarray(vlm_arr)
 
-    temp_vlm_input = "vlm_inference_ready.png"
-    pil_img_for_vlm.save(temp_vlm_input)
+
+def ocr_labels(bgr):
+    """[{"text": ..., "box_2d": [xmin, ymin, xmax, ymax]}, ...] read off the whole map.
+
+    Boxes are on the model's 0-1000 grid; scale_box_to_pixels turns them into
+    pixels of the original image.
+    """
+    temp_vlm_input = OCR_INPUT_PATH
+    preprocess_for_ocr(bgr).save(temp_vlm_input)
     try:
-        response_p1 = chat(  
-            model='qwen3-vl:4b',  
+        response_p1 = chat(
+            model='qwen3-vl:4b',
             messages=[{
                 'role': 'user',
                 'content': SYSTEM_PROMPT_OCR,
                 'images': [temp_vlm_input]
             }],
-            format=OCR_SCHEMA, 
+            format=OCR_SCHEMA,
             think = False,
             options={
-                'temperature': 0.0,  
-                'top_k': 1,          
+                'temperature': 0.0,
+                'top_k': 1,
                 'top_p': 1.0,
-                'num_ctx': 5800,    
+                'num_ctx': 5800,
             }
         )
-        
+
         labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content')) #for some reason, the response comes in the thinking field for me.
         chat(model="qwen3-vl:4b", messages=[], keep_alive=0)
     except Exception as e:
@@ -1210,332 +1121,1369 @@ def generate_track_svg(image_path, grand_prix_dates=None):
         print("Primary OCR failed: %s", e)
         try:
             #try qwen with a repeat penalty
-            response_p1 = chat(  
-                model='qwen3-vl:4b',  
+            response_p1 = chat(
+                model='qwen3-vl:4b',
                 messages=[{
                     'role': 'user',
                     'content': SYSTEM_PROMPT_OCR,
                     'images': [temp_vlm_input]
                 }],
-                format=OCR_SCHEMA, 
+                format=OCR_SCHEMA,
                 think = False,
                 options={
-                    'temperature': 0.0,  
-                    'top_k': 1,          
+                    'temperature': 0.0,
+                    'top_k': 1,
                     'top_p': 1.0,
-                    'num_ctx': 5800,  
+                    'num_ctx': 5800,
                     'repeat_penalty': 1.2,    # this is to make sure that it doesn't get stuck repeating the same token over and over again, which can happen with smaller models.
                     'repeat_last_n': 64        # Looks back 64 tokens
                 }
             )
-            
-            labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))    
-            chat(model="qwen3-vl:4b", messages=[], keep_alive=0)      
+
+            labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))
+            chat(model="qwen3-vl:4b", messages=[], keep_alive=0)
         except Exception as e2:
             #try a smaller model if qwen fails, because qwen is very large and can run out of memory if there is too much context. the smaller model is less accurate, but it can handle more context.
             chat(model="qwen3-vl:4b", messages=[], keep_alive=0) #unload the model to free up memory
             print("Secondary OCR failed: %s", e2)
-            response_p1 = chat(  
-                model='openbmb/minicpm-v4.6:1b',  
+            response_p1 = chat(
+                model='openbmb/minicpm-v4.6:1b',
                 messages=[{
                     'role': 'user',
                     'content': SYSTEM_PROMPT_OCR_FALLBACK,
                     'images': [temp_vlm_input]
                 }],
-                format=OCR_SCHEMA, 
+                format=OCR_SCHEMA,
                 think = False,
                 options={
-                    'temperature': 0.0,  
-                    'top_k': 1,          
+                    'temperature': 0.0,
+                    'top_k': 1,
                     'top_p': 1.0,
-                    'num_ctx': 16384, #more context here because this is a smaller model and if the previous model fails for lack of context, this one will be able to process it.   
+                    'num_ctx': 16384, #more context here because this is a smaller model and if the previous model fails for lack of context, this one will be able to process it.
                     'repeat_penalty': 1.2,    # this is to make sure that it doesn't get stuck repeating the same token over and over again, which can happen with smaller models.
                     'repeat_last_n': 64        # Looks back 64 tokens
 
                 }
             )
-            labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))    
-            chat(model="openbmb/minicpm-v4.6:1b", messages=[], keep_alive=0) #unload the model to free up memory    
-    
-
-
-    svg_content = (
-        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
-        f'xmlns="http://www.w3.org/2000/svg" style="background: #111;">\n'
-    )
-    # Text style grouping with drop shadow borders for visibility
-    svg_elements.append(
-        '<g fill="#FFFFFF" font-family="sans-serif" font-size="12" font-weight="bold" '
-        '   paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">'
-    )        
-    for label in labels:
-        text = label["text"]
-        if "statsf1" in text.lower() or "https://" in text.lower() or "http://" in text.lower() or ".com" in text.lower():
-            continue
-        x_min, y_min, x_max, y_max = scale_box_to_pixels(label["box_2d"], orig_w, orig_h)
-
-        raw_center_x = int((x_min + x_max) / 2)
-        raw_center_y = int((y_min + y_max) / 2)
-
-        shifted_x = raw_center_x + 50
-        shifted_y = raw_center_y + 25
-        
-        # 4. Inject into SVG elements array
-        svg_elements.append(
-            f'  <text x="{shifted_x}" y="{shifted_y + 4}" text-anchor="middle">{text}</text>'
-        )
-        
-    svg_elements.append('</g>')    
-    # ... continuing with second pass now
-    pil_img_p2 = preprocess_second_pass(pil_img_p2)
-    temp_vlm_input = "vlm_p2_inference_ready.png"
-    pil_img_p2.save(temp_vlm_input) 
-    try:
-        response_p2 = chat(  
-            model='qwen3-vl:4b',  
-            messages=[{
-                'role': 'user',
-                'content': SYSTEM_PROMPT_OBJECT_DETECTION,
-                'images': [temp_vlm_input]
-            }],
-            format=OBJECT_DETECTION_SCHEMA, 
-            think = False,
-            options={
-                'temperature': 0.0,  
-                'top_k': 1,          
-                'top_p': 1.0,
-                'num_ctx': 5800,    
-            }
-        )
-        
-        labels = json.loads(response_p2['message'].get('thinking') or response_p2['message'].get('content')) #for some reason, the response comes in the thinking field for me.
-        chat(model="qwen3-vl:4b", messages=[], keep_alive=0)
-    except Exception as e:
-        chat(model="qwen3-vl:4b", messages=[], keep_alive=0) #unload the model to free up memory
-        print("Primary OCR failed: %s", e)
-        try:
-            #try qwen with a repeat penalty
-            response_p2 = chat(  
-                model='qwen3-vl:4b',  
-                messages=[{
-                    'role': 'user',
-                    'content': SYSTEM_PROMPT_OBJECT_DETECTION,
-                    'images': [temp_vlm_input]
-                }],
-                format=OBJECT_DETECTION_SCHEMA, 
-                think = False,
-                options={
-                    'temperature': 0.0,  
-                    'top_k': 1,          
-                    'top_p': 1.0,
-                    'num_ctx': 5800,  
-                    'repeat_penalty': 1.2,    # this is to make sure that it doesn't get stuck repeating the same token over and over again, which can happen with smaller models.
-                    'repeat_last_n': 64        # Looks back 64 tokens
-                }
-            )
-            
-            labels = json.loads(response_p2['message'].get('thinking') or response_p2['message'].get('content'))    
-            chat(model="qwen3-vl:4b", messages=[], keep_alive=0)      
-        except Exception as e2:
-            #try a smaller model if qwen fails, because qwen is very large and can run out of memory if there is too much context. the smaller model is less accurate, but it can handle more context.
-            chat(model="qwen3-vl:4b", messages=[], keep_alive=0) #unload the model to free up memory
-            print("Secondary OCR failed: %s", e2)
-            response_p2 = chat(  
-                model='openbmb/minicpm-v4.6:1b',  
-                messages=[{
-                    'role': 'user',
-                    'content': SYSTEM_PROMPT_OBJECT_DETECTION_FALLBACK,
-                    'images': [temp_vlm_input]
-                }],
-                format=OBJECT_DETECTION_SCHEMA, 
-                think = False,
-                options={
-                    'temperature': 0.0,  
-                    'top_k': 1,          
-                    'top_p': 1.0,
-                    'num_ctx': 16384, #more context here because this is a smaller model and if the previous model fails for lack of context, this one will be able to process it.   
-                    'repeat_penalty': 1.2,    # this is to make sure that it doesn't get stuck repeating the same token over and over again, which can happen with smaller models.
-                    'repeat_last_n': 64        # Looks back 64 tokens
-
-                }
-            )
-            labels = json.loads(response_p2['message'].get('thinking') or response_p2['message'].get('content'))    
+            labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))
             chat(model="openbmb/minicpm-v4.6:1b", messages=[], keep_alive=0) #unload the model to free up memory
+    finally:
+        if os.path.exists(temp_vlm_input):
+            os.remove(temp_vlm_input)
+    return labels
 
-    # The chequered flag is drawn in the same white as the track, so the tracer
-    # cannot tell the two apart: left in, the glyph and its leader line come out
-    # as a stray rectangle stuck to the circuit. The second pass has just located
-    # it, so cut it out of the mask here - before anything is traced - rather
-    # than trying to filter the resulting contour back out afterwards. Only the
-    # flag's own box is cut, never the touch box: the touch box is where the
-    # leader line runs into the track, so its pixels are track, and cutting it
-    # would notch the circuit open at exactly the point the bar is drawn on.
-    flag_box = labels.get("chequered_flag") if isinstance(labels, dict) else None
-    flag_line_box = labels.get("chequered_flag_line") if isinstance(labels, dict) else None
-    if flag_box:
-        white_mask, retreat = erase_chequered_flag(
-            white_mask, flag_box, flag_line_box, orig_w, orig_h
-        )
-        if retreat is None:
-            print("Chequered flag box overlaps the track everywhere it was tried; "
-                  "left in place rather than severing the circuit.")
-        elif retreat:
-            print(f"Chequered flag box pulled back {retreat}px to keep the circuit closed.")
 
-    kernel = np.ones((3, 3), np.uint8)
-    white_mask_processed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-    
-    temp_contours, _ = cv2.findContours(white_mask_processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    track_only_mask = np.zeros_like(white_mask)
-    valid_track_contours = []
-    
-    for c in temp_contours:
-        area = cv2.contourArea(c)
-        if area > 1000:
-             valid_track_contours.append(c)
-             cv2.drawContours(track_only_mask, [c], -1, 255, -1)
-             
-    has_giant_contour = any(cv2.contourArea(c) > (h*w*0.1) for c in valid_track_contours)
+# ---------------------------------------------------------------------------
+# Three first readings of the labels, and the arbiters where they disagree.
+#
+# PaddleOCR-VL-1.6 is an OCR model rather than a general VLM, so it fails
+# differently from qwen: it misreads the odd character and merges a turn
+# number into the name beside it ("Grand6"), but it does not invent text and
+# its boxes are exact 4-corner boxes, rotated text included. docTR is neither
+# a VLM nor a language model at all, a text detector and a line recogniser,
+# with its own exact corners. The three readings are grouped by position and
+# compared. Where every reader that found a label agrees, and at least two
+# did, it is taken. Where two agree and the third reads something else, the
+# two stand unless two sure plain OCRs back the third. Anything else - no two
+# agree, or only one reader found the label - is cut out of the preprocessed
+# map, straightened, and read cold by Tesseract, EasyOCR, TrOCR and minicpm
+# (see resolve_label). A reading they back is taken; anything else keeps
+# Paddle's reading (docTR's, then qwen's, if Paddle found nothing) and is
+# marked for review, except a label only docTR found, which is dropped. A
+# region with no white in it at all is text no reader should have found and
+# is dropped.
+#
+# Paddle runs through transformers, not paddlepaddle, which has no Python
+# 3.14 build. It was measured on Monaco and Adelaide before being wired in:
+# on the raw photo it missed every steeply rotated label, on the gimp_contrast
+# image at 2x it found all 40.
+PADDLE_MODEL = "PaddlePaddle/PaddleOCR-VL-1.6"
+PADDLE_UPSCALE = 2
+PADDLE_MAX_PIXELS = 2048 * 28 * 28      # the model card's setting for spotting
+PADDLE_MAX_NEW_TOKENS = 1536
+# docTR is a third first reader, and the only one that is not a VLM: a
+# DBNet detector finds each line, rotated ones included, and PARSeq reads it.
+# It was measured on Monaco and Barcelona before being wired in: the inverted
+# contrast image at 2x read the most turn numbers of the raw photo, the
+# contrast image and its inverse at 1x and 2x. Words it is under half sure of
+# are single letters read off bits of track.
+DOCTR_DET_ARCH = "db_resnet50"
+DOCTR_RECO_ARCH = "parseq"
+DOCTR_UPSCALE = 2
+DOCTR_MIN_WORD_CONFIDENCE = 0.5
+SOURCE_NAMES = {"paddle": "Paddle", "doctr": "docTR", "qwen": "qwen"}
+# The crop is read by four arbiters, Tesseract, EasyOCR, TrOCR and minicpm.
+# Tesseract, EasyOCR and TrOCR are plain text recognisers: they read the
+# straightened crop as printed text and say how sure they are. TrOCR is a
+# transformer, but one trained only to transcribe a line of print, not to
+# answer questions about an image, so it does not fail the way the VLMs do;
+# it is also the only one of the three with a language model behind it, so it
+# reads a name through a broken glyph where Tesseract and EasyOCR, which read
+# character by character, do not - and fails by writing a likelier word. minicpm is
+# a general VLM like qwen and tends to fail the way qwen does - it answered
+# "#000000" for a lone "3" - so on its own it cannot outvote a plain OCR.
+# Tesseract runs on the CPU. The Windows build is UB Mannheim's; the Latin
+# script model (every accented name on the maps) is tessdata_best's
+# script/Latin.traineddata, kept in assets/tessdata. EasyOCR is also kept on
+# CPU: the crops are tiny, and leaving its torch model on the GPU would fight
+# qwen/Paddle/Ollama for VRAM, and so is TrOCR. TrOCR is the large printed
+# model: accuracy matters more here than the second or so per crop it costs.
+ARBITER_MODEL = "openbmb/minicpm-v4.6:1b"
+TROCR_MODEL = "microsoft/trocr-large-printed"
+TROCR_MAX_NEW_TOKENS = 32
+# A run of inked rows under this share of the tallest one is an accent or a
+# speck, not a line of its own (see text_line_crops).
+TROCR_MIN_LINE_SHARE = 0.35
+# The printed TrOCR models were fine-tuned on receipts: they write every word
+# in capitals and tack on a receipt's " :" or "*". The punctuation is dropped
+# in trocr_reading; the case cannot be recovered, so TrOCR's reading only
+# ever backs a candidate or another arbiter's spelling (see _pick_label).
+UNCASED_ARBITERS = {"TrOCR"}
+ARBITER_CROP_PATH = "vlm_arbiter_crop.png"
+TESSERACT_CMD = shutil.which("tesseract") or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSDATA_DIR = Path(__file__).resolve().parent.parent / "assets" / "tessdata"
+TESSERACT_LANG = "Latin"
+# OCR word confidences are normalised to 0-100 and a reading counts by its
+# least sure word. Agreeing with qwen or Paddle needs less than standing in
+# for both of them as a near-miss.
+ARBITER_MIN_CONFIDENCE = 50
+ARBITER_REPLACE_CONFIDENCE = 80
+ARBITER_CROP_PAD = 4
+ARBITER_CROP_SCALE = 4
+# Share of white pixels a crop needs before it is worth asking about. A real
+# label is several percent white even in a generous crop; empty tarmac or
+# photo after the hard contrast cut is black.
+ARBITER_MIN_INK = 0.01
+LABEL_LINK_PAD = 2
+NUMBER_MATCH_DISTANCE = 20.0
+# Below these the label is treated as level: a turn number's box is nearly
+# square, and reading its long edge as the text direction would stand it on
+# its side.
+STRAIGHTEN_MIN_ANGLE = 8.0
+STRAIGHTEN_MAX_ASPECT = 0.6
 
-    if has_giant_contour: 
-       erosion_kernel = np.ones((3,3), np.uint8)
-       track_mask_for_fb = cv2.erode(track_only_mask, erosion_kernel, iterations=1)
-    else:
-       track_mask_for_fb = track_only_mask
+_LOC_TOKEN = re.compile(r"<\|LOC_(\d+)\|>")
+_TRAILING_NUMBER = re.compile(r"^(.*[^\W\d_])\s*(\d{1,2})$")
+# A letter straight after the digits, so "130R" is left whole.
+_LEADING_NUMBER = re.compile(r"^(\d{1,2})\s*([^\W\d_].*)$")
+_paddle = None
+_easyocr = None
+_trocr = None
+_doctr = None
+# What TrOCR puts round a word that is not part of it: "-CAIXA", "GRAND*******".
+_TROCR_EDGE_JUNK = ":;*<>_-~.,|"
 
-    inverted_track_mask = cv2.bitwise_not(track_mask_for_fb)
-    dist_transform = cv2.distanceTransform(inverted_track_mask, cv2.DIST_L2, 5)
 
-    white_contours, _ = cv2.findContours(track_mask_for_fb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    box_regions = []
-    for cnt in white_contours:
-        area = cv2.contourArea(cnt)
-        x, y, w_box, h_box = cv2.boundingRect(cnt)
-        bbox_area = w_box * h_box
-        
-        if bbox_area < 20 or bbox_area > 1000 or min(w_box, h_box) < 5:
+class _PaddleLoadNoise(logging.Filter):
+    """Drops two warnings transformers 5 raises about its own Paddle support.
+
+    The hub config keeps mrope_section under a "default" rope, which the rope
+    validator does not know but the model reads; and transformers' own
+    PaddleOCRVLProcessor still sets the deprecated image_processor_class.
+    Neither can be fixed from here.
+    """
+
+    def filter(self, record):
+        message = record.getMessage()
+        return not ("Unrecognized keys in `rope_parameters`" in message and "mrope_section" in message
+                    or "PaddleOCRVLProcessor` defines `image_processor_class" in message)
+
+
+def _paddle_model():
+    """Paddle loaded once per process and moved onto the GPU for each map.
+
+    It is parked on the CPU between maps rather than kept on the GPU: the
+    card is 6 GB and qwen3-vl needs most of it straight afterwards.
+    """
+    global _paddle
+    import torch
+    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
+    if _paddle is None:
+        for name in ("transformers.modeling_rope_utils", "transformers.processing_utils"):
+            logging.getLogger(name).addFilter(_PaddleLoadNoise())
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        # The checkpoint's lm_head is not a copy of the embeddings and its
+        # config says so, but transformers' pre-v5 compatibility shim flips
+        # tie_word_embeddings back on while parsing the flat config.
+        config = AutoConfig.from_pretrained(PADDLE_MODEL)
+        config.tie_word_embeddings = False
+        model = AutoModelForImageTextToText.from_pretrained(
+            PADDLE_MODEL, config=config, dtype=dtype, attn_implementation="sdpa").eval()
+        processor = AutoProcessor.from_pretrained(PADDLE_MODEL)
+        _paddle = {"model": model, "processor": processor, "device": device, "dtype": dtype}
+    _paddle["model"].to(_paddle["device"])
+    return _paddle
+
+
+def _park_paddle():
+    if _paddle is None:
+        return
+    import torch
+    _paddle["model"].to("cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _label(text, points, source):
+    points = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    box = (float(points[:, 0].min()), float(points[:, 1].min()),
+           float(points[:, 0].max()), float(points[:, 1].max()))
+    return {"text": text.strip(), "points": points, "box": box, "source": source}
+
+
+def paddle_labels(bgr):
+    """Paddle's spotting output as labels with pixel corners in the original image."""
+    import torch
+    orig_h, orig_w = bgr.shape[:2]
+    image = gimp_contrast(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)).convert("L"),
+                          contrast=1.0, pivot=200).convert("RGB")
+    image = image.resize((orig_w * PADDLE_UPSCALE, orig_h * PADDLE_UPSCALE), Image.Resampling.LANCZOS)
+
+    paddle = _paddle_model()
+    processor = paddle["processor"]
+    try:
+        messages = [{"role": "user", "content": [{"type": "image", "image": image},
+                                                 {"type": "text", "text": "Spotting:"}]}]
+        # The model card reads processor.image_processor.min_pixels, which
+        # transformers 5 moved into size["shortest_edge"].
+        inputs = processor.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt",
+            processor_kwargs={"images_kwargs": {
+                "size": {"shortest_edge": processor.image_processor.size["shortest_edge"],
+                         "longest_edge": PADDLE_MAX_PIXELS}}},
+        ).to(paddle["model"].device)
+        inputs["pixel_values"] = inputs["pixel_values"].to(paddle["dtype"])
+        # use_cache has to be forced: the model's generation_config ships with
+        # it off, which re-runs the whole image for every token - 8.7s a token
+        with torch.inference_mode():
+            output = paddle["model"].generate(**inputs, max_new_tokens=PADDLE_MAX_NEW_TOKENS,
+                                              do_sample=False, use_cache=True)
+    finally:
+        _park_paddle()
+
+    generated = output[0][inputs["input_ids"].shape[-1]:]
+    if len(generated) >= PADDLE_MAX_NEW_TOKENS:
+        print(f"  Paddle hit its {PADDLE_MAX_NEW_TOKENS}-token limit; labels past that point are missing.")
+    raw = processor.decode(generated, skip_special_tokens=False)
+
+    labels = []
+    for line in raw.split("\n"):
+        locs = [int(v) for v in _LOC_TOKEN.findall(line)]
+        text = _LOC_TOKEN.sub("", line).replace("</s>", "").strip()
+        if not text:
             continue
-        
-        fill_ratio = area / bbox_area if bbox_area > 0 else 0
-        if min(w_box, h_box) > 0:
-            aspect_ratio = max(w_box, h_box) / min(w_box, h_box)
-            roi = white_mask[max(0, y):min(gray.shape[0], y+h_box), max(0, x):min(gray.shape[1], x+w_box)]
-            white_pixel_ratio = np.sum(roi == 255) / (w_box * h_box) if roi.size > 0 else 0
-            
-            perimeter = cv2.arcLength(cnt, True)
-            expected_perimeter = 2 * (w_box + h_box)
-            perimeter_ratio = perimeter / expected_perimeter if expected_perimeter > 0 else 0
-            
-            if (1.2 <= aspect_ratio <= 1.4 and fill_ratio > 0.7 and white_pixel_ratio > 0.8 and 0.8 <= perimeter_ratio <= 1.2):
-                box_regions.append((x, y, x+w_box, y+h_box))
-    
-    track_mask = white_mask.copy()
-    for x1, y1, x2, y2 in box_regions:
-        cv2.rectangle(track_mask, (x1, y1), (x2, y2), 0, -1)
-    
-    contours, _ = cv2.findContours(track_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    track_contours = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > 50:
-            track_contours.append(cnt)
+        if len(locs) != 8:
+            print(f"  Paddle returned {ascii(text)} with {len(locs)} coordinates instead of 8; skipped.")
+            continue
+        # Corners come clockwise from top-left on a 0-1000 grid over the image.
+        points = [(locs[i] * orig_w / 1000.0, locs[i + 1] * orig_h / 1000.0) for i in range(0, 8, 2)]
+        labels.append(_label(text, points, "paddle"))
+    return labels
 
-    # Tracing now happens after the second pass, so the track is the last thing
-    # built rather than the first. It still has to be the first thing *drawn* -
-    # the corner names sit on top of it - so it is collected separately and put
-    # back at the head of the list instead of appended.
-    track_elements = []
-    if track_contours:
-        track_elements.append('<g fill="none" stroke="white" stroke-width="4">')
-        for cnt in track_contours:
-            if cv2.contourArea(cnt) < 100:
+
+def _doctr_model():
+    """docTR loaded once per process and, like Paddle, on the GPU only while it reads a map."""
+    global _doctr
+    import torch
+    if _doctr is None:
+        from doctr.models import ocr_predictor
+        _doctr = {"model": ocr_predictor(det_arch=DOCTR_DET_ARCH, reco_arch=DOCTR_RECO_ARCH, pretrained=True,
+                                         assume_straight_pages=False, export_as_straight_boxes=False,
+                                         detect_orientation=False, straighten_pages=False).eval(),
+                  "device": "cuda" if torch.cuda.is_available() else "cpu", "torch": torch}
+    _doctr["model"].to(_doctr["device"])
+    return _doctr
+
+
+def doctr_labels(bgr):
+    """docTR's lines as labels with pixel corners in the original image."""
+    orig_h, orig_w = bgr.shape[:2]
+    gray = np.asarray(gimp_contrast(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)),
+                                    contrast=1.0, pivot=200), dtype=np.uint8)
+    # Dark print on a light page, as docTR was trained on.
+    image = np.stack([255 - gray] * 3, axis=-1)
+    image = cv2.resize(image, (orig_w * DOCTR_UPSCALE, orig_h * DOCTR_UPSCALE), interpolation=cv2.INTER_LANCZOS4)
+    doctr = _doctr_model()
+    try:
+        with doctr["torch"].inference_mode():
+            page = doctr["model"]([image]).pages[0]
+    finally:
+        doctr["model"].to("cpu")
+        if doctr["device"] == "cuda":
+            doctr["torch"].cuda.empty_cache()
+
+    labels = []
+    for block in page.blocks:
+        for line in block.lines:
+            words = [w.value for w in line.words if w.confidence >= DOCTR_MIN_WORD_CONFIDENCE]
+            if not words:
                 continue
-            epsilon = 0.8
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            points = " ".join([f"{int(p[0][0]) + 50},{int(p[0][1]) + 25}" for p in approx])
-            track_elements.append(f'<polyline points="{points}" />')
-        track_elements.append('</g>')
+            # Relative corners, clockwise from top-left; a straight line comes
+            # back as two corners.
+            corners = np.asarray(line.geometry, dtype=np.float32).reshape(-1, 2)
+            if len(corners) == 2:
+                (x1, y1), (x2, y2) = corners
+                corners = np.array([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], dtype=np.float32)
+            points = [(float(x) * orig_w, float(y) * orig_h) for x, y in corners[:4]]
+            labels.append(_label(" ".join(words), points, "doctr"))
+    return labels
 
-    # Arrows are measured off the original image rather than asked of the second
-    # pass: the detector reads the head off the glyph's own shape, so it cannot
-    # do what the model kept doing and hand back the tail as the point. Each one
-    # is redrawn at a common size, and the circuit direction is read off the same
-    # two points against the centre of the track.
-    OFFSET_X, OFFSET_Y = 50, 25
+
+def qwen_labels(bgr):
+    orig_h, orig_w = bgr.shape[:2]
+    labels = []
+    for label in ocr_labels(bgr):
+        x1, y1, x2, y2 = scale_box_to_pixels(label["box_2d"], orig_w, orig_h)
+        labels.append(_label(str(label["text"]), [(x1, y1), (x2, y1), (x2, y2), (x1, y2)], "qwen"))
+    return labels
+
+
+def normalise_text(text):
+    """What two readings are compared on: no accents, case, spacing or punctuation."""
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in text if c.isalnum() and not unicodedata.combining(c)).casefold()
+
+
+def _is_watermark(text):
+    lowered = text.lower()
+    return "statsf1" in lowered or "http" in lowered or ".com" in lowered
+
+
+def split_attached_number(label):
+    """"Grand6" -> "Grand" and "6"; "7Wirth" -> "7" and "Wirth".
+
+    A turn number printed beside a name is a label of its own, and Paddle
+    sometimes reads the two as one, with the number on either side (Monaco's
+    "Grand6", Barcelona's "7 Würth"). Left joined, the name can never agree
+    with qwen's. Each part's share of the box is estimated from its share of
+    the characters, which is close enough to crop it.
+    """
+    trailing = _TRAILING_NUMBER.match(label["text"])
+    leading = _LEADING_NUMBER.match(label["text"])
+    if trailing:
+        first, second = trailing.group(1).strip(), trailing.group(2)
+    elif leading:
+        first, second = leading.group(1), leading.group(2).strip()
+    else:
+        return [label]
+    split = len(first) / float(len(first) + len(second))
+    tl, tr, br, bl = label["points"]
+    top, bottom = tl + (tr - tl) * split, bl + (br - bl) * split
+    return [_label(first, [tl, top, bottom, bl], label["source"]),
+            _label(second, [top, tr, br, bottom], label["source"])]
+
+
+def _centre(box):
+    return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+
+def _boxes_touch(a, b, pad):
+    return a[0] - pad <= b[2] and b[0] - pad <= a[2] and a[1] - pad <= b[3] and b[1] - pad <= a[3]
+
+
+def _union_box(labels):
+    return (min(l["box"][0] for l in labels), min(l["box"][1] for l in labels),
+            max(l["box"][2] for l in labels), max(l["box"][3] for l in labels))
+
+
+def reading_order_text(labels):
+    """Join the lines of a name top to bottom, left to right within a line."""
+    lines = []
+    for label in sorted(labels, key=lambda l: _centre(l["box"])[1]):
+        cy = _centre(label["box"])[1]
+        height = label["box"][3] - label["box"][1]
+        if lines and abs(cy - lines[-1]["cy"]) < 0.5 * min(height, lines[-1]["height"]):
+            lines[-1]["labels"].append(label)
+        else:
+            lines.append({"cy": cy, "height": height, "labels": [label]})
+    return " ".join(l["text"] for line in lines
+                    for l in sorted(line["labels"], key=lambda l: l["box"][0]))
+
+
+def group_names(labels):
+    """Clusters of name labels, from either model, that touch one another.
+
+    statsf1 sets a long name on two lines and the models do not agree on
+    whether that is one label or two - Paddle returns "S de la" and
+    "Piscine", qwen "S de la Piscine" - so names are compared a cluster at a
+    time rather than a label at a time.
+    """
+    parent = list(range(len(labels)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            if _boxes_touch(labels[i]["box"], labels[j]["box"], LABEL_LINK_PAD):
+                parent[root(j)] = root(i)
+    groups = {}
+    for i, label in enumerate(labels):
+        groups.setdefault(root(i), []).append(label)
+    return list(groups.values())
+
+
+def match_numbers(by_source, sources):
+    """Turn numbers from each reader matched by position: [{source: [label] or []}].
+
+    Each reader's numbers are matched in turn to the nearest cluster so far
+    within NUMBER_MATCH_DISTANCE that has none of that reader's yet, nearest
+    pair first; any left over start clusters of their own.
+    """
+    clusters = []
+    for labels, source in zip(by_source, sources):
+        pairs = sorted((math.dist(_centre(c["centre"]), _centre(l["box"])), ci, li)
+                       for ci, c in enumerate(clusters) for li, l in enumerate(labels))
+        used_c, used_l = set(), set()
+        for distance, ci, li in pairs:
+            if distance > NUMBER_MATCH_DISTANCE:
+                break
+            if ci in used_c or li in used_l:
+                continue
+            used_c.add(ci)
+            used_l.add(li)
+            clusters[ci][source] = [labels[li]]
+        clusters += [{"centre": l["box"], source: [l]} for li, l in enumerate(labels) if li not in used_l]
+    return [{s: c.get(s, []) for s in sources} for c in clusters]
+
+
+def label_crop(binary, points):
+    """The region of the preprocessed map under `points`, turned level and enlarged."""
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    rect = cv2.minAreaRect(points)
+    (cx, cy), _, _ = rect
+    corners = cv2.boxPoints(rect)
+    edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    start, end = max(edges, key=lambda e: float(np.hypot(*(e[1] - e[0]))))
+    length = float(np.hypot(*(end - start)))
+    thickness = min(float(np.hypot(*(e[1] - e[0]))) for e in edges)
+    angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
+    if angle > 90:
+        angle -= 180
+    elif angle <= -90:
+        angle += 180
+
+    height, width = binary.shape
+    if abs(angle) >= STRAIGHTEN_MIN_ANGLE and thickness < STRAIGHTEN_MAX_ASPECT * length:
+        # Positive angles in getRotationMatrix2D turn the picture anticlockwise,
+        # which in y-down coordinates takes a direction at `angle` back to 0.
+        matrix = cv2.getRotationMatrix2D((float(cx), float(cy)), angle, 1.0)
+        level = cv2.warpAffine(binary, matrix, (width, height), flags=cv2.INTER_LINEAR, borderValue=0)
+        x1, x2 = cx - length / 2.0, cx + length / 2.0
+        y1, y2 = cy - thickness / 2.0, cy + thickness / 2.0
+    else:
+        level = binary
+        x1, y1 = points[:, 0].min(), points[:, 1].min()
+        x2, y2 = points[:, 0].max(), points[:, 1].max()
+
+    x1, y1 = max(0, int(x1) - ARBITER_CROP_PAD), max(0, int(y1) - ARBITER_CROP_PAD)
+    x2, y2 = min(width, int(math.ceil(x2)) + ARBITER_CROP_PAD), min(height, int(math.ceil(y2)) + ARBITER_CROP_PAD)
+    return level[y1:y2, x1:x2]
+
+
+def arbiter_crop(binary, points):
+    """The label under `points`, level, enlarged and framed in black; None if it has no white in it."""
+    crop = label_crop(binary, points)
+    if crop.size == 0 or float(np.count_nonzero(crop > 127)) / crop.size < ARBITER_MIN_INK:
+        return None
+    image = Image.fromarray(crop)
+    image = image.resize((image.width * ARBITER_CROP_SCALE, image.height * ARBITER_CROP_SCALE),
+                         Image.Resampling.LANCZOS)
+    canvas = Image.new("L", (image.width + 20, image.height + 20), 0)
+    canvas.paste(image, (10, 10))
+    return canvas
+
+
+def minicpm_reading(canvas):
+    """What minicpm reads in the crop: "" for no text, None if it failed."""
+    canvas.save(ARBITER_CROP_PATH)
+    try:
+        response = chat(
+            model=ARBITER_MODEL,
+            messages=[{"role": "user",
+                       "content": ("The image shows white text on a black background, cut from a Formula One "
+                                   "circuit map. Transcribe it exactly as written. If there is no text, return "
+                                   "an empty string."),
+                       "images": [ARBITER_CROP_PATH]}],
+            format={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            think=False,
+            options={"temperature": 0.0, "top_k": 1, "top_p": 1.0, "num_ctx": 4096},
+        )
+        message = response["message"]
+        return str(json.loads(message.get("content") or message.get("thinking"))["text"]).strip()
+    except Exception as e:
+        print(f"  minicpm could not read a crop: {e}")
+        return None
+    finally:
+        if os.path.exists(ARBITER_CROP_PATH):
+            os.remove(ARBITER_CROP_PATH)
+
+
+def tesseract_reading(canvas, digits=False):
+    """(text, confidence) from Tesseract for the crop: ("", 0) for no text, (None, 0) if it failed.
+
+    `digits` reads the crop as a turn number: one word, digits only.
+    """
+    # Tesseract is trained on dark text on a light page.
+    canvas = Image.fromarray(255 - np.asarray(canvas))
+    # A name is read as a block, which takes the two lines statsf1 sets a long
+    # name on; a turn number as a single word.
+    config = "--psm 8 -c tessedit_char_whitelist=0123456789" if digits else "--psm 6"
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+    # The tessdata path has spaces and a comma in it, which pytesseract's
+    # config string does not quote on Windows; the environment variable does.
+    os.environ["TESSDATA_PREFIX"] = str(TESSDATA_DIR)
+    try:
+        data = pytesseract.image_to_data(canvas, lang=TESSERACT_LANG, config=config,
+                                         output_type=pytesseract.Output.DICT)
+    except (pytesseract.TesseractError, pytesseract.TesseractNotFoundError, OSError) as e:
+        print(f"  Tesseract could not read a crop: {e}")
+        return None, 0.0
+    lines = {}
+    for i, word in enumerate(data["text"]):
+        if word.strip() and float(data["conf"][i]) >= 0:
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            lines.setdefault(key, []).append((word.strip(), float(data["conf"][i])))
+    if not lines:
+        return "", 0.0
+    # The padded crop can take in a bit of track, which comes back as a line
+    # of its own with no word Tesseract is sure of - Pescara's "Spoltore" (89)
+    # under a corner of track read as "r" (43). A line like that is dropped,
+    # unless it is all there is.
+    lines = list(lines.values())
+    kept = [line for line in lines if max(c for _, c in line) >= ARBITER_MIN_CONFIDENCE] or lines
+    text = " ".join(word for line in kept for word, _ in line)
+    return text, min(c for line in kept for _, c in line)
+
+
+def _easyocr_reader():
+    global _easyocr
+    if _easyocr is None:
+        import easyocr
+        _easyocr = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _easyocr
+
+
+def _ordered_easyocr_text(words):
+    lines = []
+    for word in sorted(words, key=lambda w: _centre(w["box"])[1]):
+        cy = _centre(word["box"])[1]
+        height = word["box"][3] - word["box"][1]
+        if lines and abs(cy - lines[-1]["cy"]) < 0.5 * min(height, lines[-1]["height"]):
+            lines[-1]["words"].append(word)
+        else:
+            lines.append({"cy": cy, "height": height, "words": [word]})
+    return " ".join(w["text"] for line in lines
+                    for w in sorted(line["words"], key=lambda item: item["box"][0]))
+
+
+def _easyocr_result_text(results):
+    words = []
+    for points, text, confidence in results:
+        text = str(text).strip()
+        if not text:
+            continue
+        points = np.asarray(points, dtype=np.float32).reshape(4, 2)
+        box = (float(points[:, 0].min()), float(points[:, 1].min()),
+               float(points[:, 0].max()), float(points[:, 1].max()))
+        words.append({"text": text, "box": box, "confidence": float(confidence) * 100.0})
+    if not words:
+        return "", 0.0
+    return _ordered_easyocr_text(words), min(w["confidence"] for w in words)
+
+
+def easyocr_reading(canvas, digits=False):
+    """(text, confidence) from EasyOCR for the crop: ("", 0) for no text, (None, 0) if it failed."""
+    try:
+        reader = _easyocr_reader()
+        kwargs = {"detail": 1, "paragraph": False, "decoder": "greedy"}
+        if digits:
+            kwargs["allowlist"] = "0123456789"
+        results = reader.readtext(np.asarray(canvas), **kwargs)
+    except Exception as e:
+        print(f"  EasyOCR could not read a crop: {e}")
+        return None, 0.0
+    return _easyocr_result_text(results)
+
+
+def _trocr_model():
+    """TrOCR loaded once per process, on the CPU for the same reason as EasyOCR.
+
+    The processor is put together by hand: transformers 5's AutoTokenizer
+    cannot build the checkpoint's fast tokenizer, but its RobertaTokenizer
+    files load as they are.
+    """
+    global _trocr
+    if _trocr is None:
+        import torch
+        from transformers import RobertaTokenizer, TrOCRProcessor, ViTImageProcessor, VisionEncoderDecoderModel
+        processor = TrOCRProcessor(image_processor=ViTImageProcessor.from_pretrained(TROCR_MODEL),
+                                   tokenizer=RobertaTokenizer.from_pretrained(TROCR_MODEL))
+        model = VisionEncoderDecoderModel.from_pretrained(TROCR_MODEL).eval()
+        # The sinusoidal position table is a plain attribute, not a weight, so
+        # transformers 5's meta-device load leaves it empty; with None the
+        # module builds it on its first call.
+        for module in model.decoder.modules():
+            if type(module).__name__ == "TrOCRSinusoidalPositionalEmbedding":
+                module.weights = None
+        tokenizer = processor.tokenizer
+        digit_ids = [i for i in range(len(tokenizer))
+                     if tokenizer.convert_ids_to_tokens(i).lstrip("Ġ").isdigit()]
+        _trocr = {"model": model, "processor": processor, "torch": torch,
+                  "digit_ids": digit_ids + [model.generation_config.eos_token_id or tokenizer.eos_token_id]}
+    return _trocr
+
+
+def text_line_crops(canvas):
+    """The crop cut into its lines of text, top to bottom, by the black rows between them.
+
+    TrOCR reads one line at a time; statsf1 sets a long name on two.
+    """
+    arr = np.asarray(canvas)
+    inked = np.count_nonzero(arr > 127, axis=1) > 0
+    runs, start = [], None
+    for y, on in enumerate(list(inked) + [False]):
+        if on and start is None:
+            start = y
+        elif not on and start is not None:
+            runs.append([start, y])
+            start = None
+    # A run much shorter than the tallest is an accent or a speck of track, and
+    # belongs to the line it is nearest.
+    tallest = max((b - a for a, b in runs), default=0)
+    lines = []
+    for run in runs:
+        if lines and (run[1] - run[0] < TROCR_MIN_LINE_SHARE * tallest
+                      or lines[-1][1] - lines[-1][0] < TROCR_MIN_LINE_SHARE * tallest):
+            lines[-1][1] = run[1]
+        else:
+            lines.append(run)
+    pad = 10
+    return [canvas.crop((0, max(0, a - pad), canvas.width, min(canvas.height, b + pad))) for a, b in lines]
+
+
+def trocr_reading(canvas, digits=False):
+    """(text, confidence) from TrOCR for the crop: ("", 0) for no text, (None, 0) if it failed.
+
+    TrOCR always writes something, so its confidence matters more than the
+    others': a word counts by the probability of all its tokens together.
+    """
+    try:
+        trocr = _trocr_model()
+        torch, model, processor = trocr["torch"], trocr["model"], trocr["processor"]
+        tokenizer = processor.tokenizer
+        words = []
+        for line in text_line_crops(canvas):
+            # Trained on dark print on a light page, like Tesseract.
+            image = Image.fromarray(255 - np.asarray(line)).convert("RGB")
+            pixels = processor(images=image, return_tensors="pt").pixel_values
+            kwargs = {"max_new_tokens": TROCR_MAX_NEW_TOKENS, "num_beams": 1, "do_sample": False,
+                      "output_scores": True, "return_dict_in_generate": True}
+            if digits:
+                kwargs["prefix_allowed_tokens_fn"] = lambda batch, ids: trocr["digit_ids"]
+            with torch.inference_mode():
+                out = model.generate(pixels, **kwargs)
+            tokens = out.sequences[0, -len(out.scores):].tolist()
+            for token, scores in zip(tokens, out.scores):
+                if token in tokenizer.all_special_ids:
+                    continue
+                piece = tokenizer.convert_ids_to_tokens(token)
+                probability = float(torch.softmax(scores[0].float(), dim=-1)[token])
+                if piece.startswith("Ġ") or not words:
+                    words.append({"tokens": [token], "probability": probability})
+                else:
+                    words[-1]["tokens"].append(token)
+                    words[-1]["probability"] *= probability
+    except Exception as e:
+        print(f"  TrOCR could not read a crop: {e}")
+        return None, 0.0
+    words = [(tokenizer.decode(w["tokens"]).strip(), w["probability"] * 100.0) for w in words]
+    words = [(text.strip(_TROCR_EDGE_JUNK), confidence) for text, confidence in words]
+    words = [(text, confidence) for text, confidence in words if any(c.isalnum() for c in text)]
+    if not words:
+        return "", 0.0
+    return " ".join(text for text, _ in words), min(confidence for _, confidence in words)
+
+
+# Every label on a statsf1 map is white glyphs, and find_text_lines already
+# knows which white pixels are glyphs rather than track, flag or arrow. A
+# label a model reports where there are none - qwen's "Senna Chicane" and "3"
+# on maps with no text at all, lifted from its own prompt - is dropped before
+# it can be matched with anything. The glyph mask is used rather than the line
+# boxes because the line filter throws out anything under 6px wide, which is a
+# lone "1". Boxes are padded because qwen's are loose.
+#
+# Only qwen's readings get the glyph test. A turn number printed against the
+# track's edge line is one white component with the whole circuit, so it is
+# not in the glyph mask at all - Barcelona's "1", Monaco's "7" and Singapore's
+# "1" were all dropped that way while Paddle had read them correctly. Paddle
+# has not invented a label on any map tested, so its readings only have to
+# have some white under them.
+LABEL_GLYPH_PAD = 3
+LABEL_MIN_GLYPH_PIXELS = 8
+# When the readings differ, an arbiter's is taken if it is this close to every
+# other one: it reads a straightened crop of the label alone,
+# and where the other two are near-misses of it (Pescara: "Spoldore",
+# "Spotore", "Spoltore") it has been the right one. Anything further off -
+# "#000000" for a lone "3" - is noise, and Paddle's reading stands.
+#
+# The allowance shrinks with length, one edit per four characters: a single
+# character is within two edits of any other, which is how Barcelona's "1"
+# became minicpm's "L". A turn number is never replaced by letters or the
+# other way round.
+ARBITER_MAX_EDIT_DISTANCE = 2
+ARBITER_CHARS_PER_EDIT = 4
+
+
+def edit_distance(a, b):
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
+        previous = current
+    return previous[-1]
+
+
+def close_reading(read, candidate):
+    """Whether an arbiter's reading is a near-miss of `candidate` rather than something else."""
+    a, b = normalise_text(read), normalise_text(candidate)
+    if not a or not b or a.isdigit() != b.isdigit():
+        return False
+    allowed = min(ARBITER_MAX_EDIT_DISTANCE, len(b) // ARBITER_CHARS_PER_EDIT)
+    return edit_distance(a, b) <= allowed
+
+
+def _is_accented(c):
+    return c.isalpha() and ord(c) > 127
+
+
+def accent_variant(accented, other):
+    """Whether `other` is `accented` with only its accented letters misread.
+
+    Each accented letter may come back as up to two other characters or as
+    none - Tesseract reads Barcelona's "Würth" as "Wiirth", Paddle as "Wirth" -
+    while every other letter must be the same. Case, spacing and punctuation
+    are ignored.
+    """
+    if not any(_is_accented(c) for c in accented) or any(_is_accented(c) for c in other):
+        return False
+    pattern = "".join(r"[^\W_]{0,2}" if _is_accented(c) else re.escape(c)
+                      for c in accented.casefold() if c.isalnum())
+    return re.fullmatch(pattern, "".join(c for c in other.casefold() if c.isalnum())) is not None
+
+
+def resolve_label(candidates, readings, minicpm):
+    """(text, review) for a label no two first readers agreed on.
+
+    `candidates` are Paddle's, docTR's and qwen's readings, in that order,
+    for those that found the label. `readings`
+    are the plain OCRs' (name, text, confidence), most trusted first:
+    Tesseract, EasyOCR, TrOCR. They count only at ARBITER_MIN_CONFIDENCE, and
+    minicpm, which fails the way qwen does, never outvotes them. Settled, in
+    this order:
+    - A plain OCR matches a candidate and no other arbiter backs another one.
+    - Two arbiters match the same candidate.
+    - No plain OCR has a sure reading and minicpm matches a candidate.
+    - Two arbiters read the same near-miss of every candidate.
+    Anything else goes to review with, in this order, the most trusted plain
+    OCR's match, a very sure plain-OCR near-miss, minicpm's match, a minicpm
+    near-miss, or the first candidate.
+
+    Whichever is picked, an arbiter's reading that is the same name with its
+    accents kept takes its place, as where qwen and Paddle agree.
+    """
+    plain = [{"name": name, "text": text, "confidence": confidence}
+             for name, text, confidence in readings if text and confidence >= ARBITER_MIN_CONFIDENCE]
+    text, review = _pick_label(candidates, plain, minicpm)
+    for read in [arbiter["text"] for arbiter in plain] + [minicpm]:
+        if read and accent_variant(read, text):
+            return read, review
+    return text, review
+
+
+def _pick_label(candidates, plain, minicpm):
+    """resolve_label's choice before accents; `plain` is the sure plain-OCR readings."""
+    def matching(read):
+        return next((t for t in candidates if read and normalise_text(t) == normalise_text(read)), None)
+
+    def near_every_candidate(read):
+        return bool(read) and any(c.isalnum() for c in read) and all(close_reading(read, t) for t in candidates)
+
+    by_plain = [(arbiter, matching(arbiter["text"])) for arbiter in plain]
+    by_minicpm = matching(minicpm)
+    for arbiter, match in by_plain:
+        if match is not None and by_minicpm in (None, match) \
+                and all(other in (None, match) for other_plain, other in by_plain if other_plain is not arbiter):
+            return match, False
+
+    arbiter_matches = [match for _, match in by_plain if match is not None]
+    if by_minicpm is not None:
+        arbiter_matches.append(by_minicpm)
+    for candidate in candidates:
+        if sum(match == candidate for match in arbiter_matches) >= 2:
+            return candidate, False
+
+    if not plain and by_minicpm is not None:
+        return by_minicpm, False
+
+    # An uncased arbiter's reading can back a near-miss but is never written
+    # out itself: two readings that agree give the cased one's spelling.
+    near_reads = [arbiter for arbiter in plain if near_every_candidate(arbiter["text"])]
+    if near_every_candidate(minicpm):
+        near_reads.append({"name": "minicpm", "text": minicpm})
+    seen = {}
+    for arbiter in near_reads:
+        normalised = normalise_text(arbiter["text"])
+        if normalised in seen:
+            pair = (seen[normalised], arbiter)
+            return next(a for a in pair if a["name"] not in UNCASED_ARBITERS)["text"], False
+        seen[normalised] = arbiter
+
+    for _, match in by_plain:
+        if match is not None:
+            return match, True
+    for arbiter in plain:
+        if arbiter["name"] not in UNCASED_ARBITERS and arbiter["confidence"] >= ARBITER_REPLACE_CONFIDENCE \
+                and near_every_candidate(arbiter["text"]):
+            return arbiter["text"], True
+    if by_minicpm is not None:
+        return by_minicpm, True
+    if near_every_candidate(minicpm):
+        return minicpm, True
+    return candidates[0], True
+
+
+def pixels_under(mask, box):
+    height, width = mask.shape
+    x1, y1 = max(0, int(box[0]) - LABEL_GLYPH_PAD), max(0, int(box[1]) - LABEL_GLYPH_PAD)
+    x2 = min(width, int(math.ceil(box[2])) + LABEL_GLYPH_PAD)
+    y2 = min(height, int(math.ceil(box[3])) + LABEL_GLYPH_PAD)
+    if x2 <= x1 or y2 <= y1:
+        return 0
+    return int(np.count_nonzero(mask[y1:y2, x1:x2]))
+
+
+def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
+    """[{"text", "box", "review", "alt"}] for one map, cross-checked as described above.
+
+    `glyph_mask` is find_text_lines' glyph mask for the map, which qwen's
+    readings are checked against; `white_mask` the white mask it was taken
+    from, which Paddle's and docTR's are. Without them no label is checked
+    against the pixels.
+    """
+    readers = {"paddle": paddle_labels, "doctr": doctr_labels, "qwen": qwen_labels}
+    found = {}
+    for source, read in readers.items():
+        try:
+            found[source] = read(bgr)
+        except Exception as e:
+            print(f"  WARNING: {pid}: {SOURCE_NAMES[source]} failed ({e}); the other readers go unchecked by it.")
+            found[source] = []
+
+    names, numbers = {s: [] for s in readers}, {s: [] for s in readers}
+    no_text = 0
+    for label in [l for labels in found.values() for l in labels]:
+        for part in split_attached_number(label):
+            if _is_watermark(part["text"]) or not any(c.isalnum() for c in part["text"]):
+                continue
+            mask = glyph_mask if part["source"] == "qwen" else white_mask
+            if mask is not None and pixels_under(mask, part["box"]) < LABEL_MIN_GLYPH_PIXELS:
+                print(f"  {pid}: {SOURCE_NAMES[part['source']]} read {ascii(part['text'])} at "
+                      f"{tuple(int(v) for v in part['box'])}, where the map has no text - dropped.")
+                no_text += 1
+                continue
+            kind = numbers if part["text"].isdigit() else names
+            kind[part["source"]].append(part)
+
+    clusters = [{s: [l for l in g if l["source"] == s] for s in readers}
+                for g in group_names([l for s in readers for l in names[s]])]
+    clusters += match_numbers([numbers[s] for s in readers], list(readers))
+
+    binary = np.asarray(gimp_contrast(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)),
+                                      contrast=1.0, pivot=200), dtype=np.uint8)
+    results = []
+    counts = {"agreed": 0, "majority": 0, "overturned": 0, "settled": 0, "confirmed": 0, "review": 0,
+              "dropped": 0, "unconfirmed": 0}
+    minicpm_used = False
+    for cluster in clusters:
+        # Paddle's order, then docTR's, then qwen's: the first two read exact
+        # corners that follow rotated text, qwen a loose upright box.
+        texts = {s: reading_order_text(cluster[s]) for s in readers if cluster[s]}
+        box = _union_box([l for s in readers for l in cluster[s]])
+        points = np.concatenate([l["points"] for l in next(cluster[s] for s in readers if cluster[s])])
+        votes = {}
+        for source, text in texts.items():
+            votes.setdefault(normalise_text(text), []).append(source)
+        majority = max(votes.values(), key=len)
+        # Same words from every reader that found the label, and at least two
+        # of them; keep whichever kept its accents.
+        if len(votes) == 1 and len(majority) >= 2:
+            text = max((texts[s] for s in majority), key=lambda t: sum(ord(c) > 127 for c in t))
+            results.append({"text": text, "box": box, "review": False, "alt": ""})
+            counts["agreed"] += 1
+            continue
+
+        candidates = list(texts.values())
+        canvas = arbiter_crop(binary, points)
+        if canvas is None:
+            print(f"  {pid}: {ascii(candidates)} sits on a blank region of the map - dropped.")
+            counts["dropped"] += 1
+            continue
+        digits = all(t.isdigit() for t in candidates)
+        readings = [("Tesseract", *tesseract_reading(canvas, digits=digits)),
+                    ("EasyOCR", *easyocr_reading(canvas, digits=digits)),
+                    ("TrOCR", *trocr_reading(canvas, digits=digits))]
+        minicpm = minicpm_reading(canvas)
+        minicpm_used = True
+
+        if len(majority) >= 2:
+            # Two first readers agree and the third reads something else. The
+            # two stand unless two sure plain OCRs both read the dissent.
+            winner = max((s for s in majority), key=lambda s: sum(ord(c) > 127 for c in texts[s]))
+            text, review = texts[winner], False
+            dissent = [texts[s] for s in texts if s not in majority]
+            backing = [t for _, t, c in readings
+                       if t and c >= ARBITER_MIN_CONFIDENCE and normalise_text(t) == normalise_text(dissent[0])]
+            if len(backing) >= 2:
+                text, review = dissent[0], True
+                counts["overturned"] += 1
+                print(f"  {pid}: {ascii(texts[winner])} from two readers, but two arbiters read "
+                      f"{ascii(dissent[0])} - kept for review.")
+            else:
+                counts["majority"] += 1
+        else:
+            text, review = resolve_label(candidates, readings, minicpm)
+            if review and list(texts) == ["doctr"]:
+                # docTR alone reads odd letters off bits of track ("a", "g");
+                # a label nothing else found and no arbiter backs is dropped.
+                print(f"  {pid}: only docTR read {ascii(texts['doctr'])} and no arbiter backs it - dropped.")
+                counts["unconfirmed"] += 1
+                continue
+            if not review:
+                counts["settled" if len(candidates) >= 2 else "confirmed"] += 1
+            else:
+                print(f"  {pid}: label {ascii(text)} unresolved ("
+                      + "".join(f"{SOURCE_NAMES[s]} {ascii(texts.get(s))}, " for s in readers)
+                      + "".join(f"{name} {ascii(t)} at {c:.0f}, " for name, t, c in readings)
+                      + f"minicpm {ascii(minicpm)}) - kept for review.")
+                counts["review"] += 1
+        # The alternatives are the other candidates, plus, for a label left
+        # for review, whatever else the arbiters read.
+        alts = []
+        for t in list(texts.values()) + ([t for _, t, _ in readings] + [minicpm] if review else []):
+            if t and normalise_text(t) != normalise_text(text)                     and all(normalise_text(t) != normalise_text(a) for a in alts):
+                alts.append(t)
+        results.append({"text": text, "box": box, "review": review, "alt": " / ".join(alts)})
+
+    if minicpm_used:
+        chat(model=ARBITER_MODEL, messages=[], keep_alive=0)
+    print(f"  {pid}: {len(results)} labels - {counts['agreed']} agreed, {counts['majority']} taken two readers "
+          f"to one ({counts['overturned']} overturned for review), {counts['settled']} settled by the arbiters, "
+          f"{counts['confirmed']} single readings confirmed, {counts['review']} for review, "
+          f"{counts['dropped']} dropped as blank, {counts['unconfirmed']} unconfirmed docTR readings dropped, "
+          f"{no_text} readings dropped for having no text under them.")
+    return results
+
+
+def unload_ocr_models():
+    global _paddle, _easyocr, _trocr, _doctr
+    for model in OCR_MODELS:
+        chat(model=model, messages=[], keep_alive=0)
+    if _paddle is not None:
+        _paddle = None
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    _easyocr = None
+    _trocr = None
+    _doctr = None
+
+
+# ---------------------------------------------------------------------------
+# Direction, read against the track itself.
+#
+# The centroid reading (arrow_direction above) fails whenever the arrow sits on
+# a straight that runs past the centre of the layout - Jacarepagua's pit
+# straight, Miami's, Baku's - because the cross product of two nearly parallel
+# vectors has no reliable sign. This reading needs no centre: it finds the
+# nearest point of the band's outline to the arrow and asks whether the arrow
+# runs with or against the outline's traversal. OpenCV traverses an outer
+# contour one way round and a hole's contour the other, so a hole's answer is
+# flipped, and for a simple closed loop every hole is circled the same way as
+# the outside, which makes the two agree. The last step - mapping the outer
+# contour's oriented area onto Clockwise/Anticlockwise - is fixed empirically:
+# checked against the arrow on all 157 maps, it agrees everywhere the reading
+# is usable except Jacarepagua, where it is right and the old reading was not.
+TANGENT_MAX_DISTANCE_FRACTION = 0.03
+MIN_TANGENT_DISTANCE = 5.0        # an arrow drawn on top of the band has no side
+TANGENT_HALF_SPAN = 15
+MIN_TANGENT_ALIGNMENT = 0.3
+RING_CLOSED_RATIO = 1.3
+RING_INTACT_FRACTION = 0.8        # of the untouched mask's enclosed area
+
+
+def enclosed_area(band):
+    """Area inside the band's largest outer contour - the whole infield for a closed ring."""
+    contours, _ = cv2.findContours(band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return max((cv2.contourArea(c) for c in contours), default=0.0)
+
+
+def band_geometry(band, reference_area=None):
+    """Densified outlines of the band with their nesting, plus the outer orientation.
+
+    `reference_area` is the enclosed area of the band traced off the untouched
+    mask; if cleaning the mask has cost more than a fifth of it, the ring was
+    severed somewhere and the reading is marked unusable.
+    """
+    contours, hierarchy = cv2.findContours(band, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    hierarchy = hierarchy[0]
+    outlines = []
+    outer_sign = 0.0
+    largest = 0.0
+    for i, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+        if area < 50:
+            continue
+        is_outer = hierarchy[i][3] == -1
+        if is_outer and area > largest:
+            largest = area
+            outer_sign = float(np.sign(cv2.contourArea(contour, oriented=True)))
+        outlines.append((_densify(contour.reshape(-1, 2).astype(np.float64)), is_outer))
+    if outer_sign == 0.0:
+        return None
+    # A closed ring's outer contour encloses the whole infield, many times the
+    # band's own area; a severed ring's snakes back along the inside edge and
+    # encloses little more than the band itself. The inside edge of a severed
+    # ring is traversed the wrong way round, so the reading below cannot be
+    # trusted on one - the flag is carried out so the caller can say so.
+    band_area = float(np.count_nonzero(band))
+    closed = largest >= RING_CLOSED_RATIO * band_area
+    if reference_area:
+        closed = closed and largest >= RING_INTACT_FRACTION * reference_area
+    return {"outlines": outlines, "outer_sign": outer_sign, "closed": closed}
+
+
+def tangent_direction(geometry, base, tip, scale):
+    """Which way round the lap an arrow points, read against the outline beside it."""
+    if geometry is None:
+        return None
+    mid = np.array([(base[0] + tip[0]) / 2.0, (base[1] + tip[1]) / 2.0])
+    axis = np.array([tip[0] - base[0], tip[1] - base[1]], dtype=np.float64)
+    if np.linalg.norm(axis) == 0:
+        return None
+    axis /= np.linalg.norm(axis)
+    best = None
+    for pts, is_outer in geometry["outlines"]:
+        d = np.hypot(pts[:, 0] - mid[0], pts[:, 1] - mid[1])
+        i = int(np.argmin(d))
+        if best is None or d[i] < best[0]:
+            best = (float(d[i]), pts, i, is_outer)
+    distance, pts, i, is_outer = best
+    n = len(pts)
+    k = min(TANGENT_HALF_SPAN, (n - 1) // 2)
+    tangent = pts[(i + k) % n] - pts[(i - k) % n]
+    if np.linalg.norm(tangent) == 0:
+        return None
+    tangent /= np.linalg.norm(tangent)
+    alignment = float(tangent @ axis)
+    along = alignment * (1.0 if is_outer else -1.0)
+    lap = geometry["outer_sign"] if along > 0 else -geometry["outer_sign"]
+    return {"direction": "Clockwise" if lap > 0 else "Anticlockwise",
+            "alignment": alignment,
+            "distance": distance,
+            "usable": (geometry["closed"]
+                       and abs(alignment) >= MIN_TANGENT_ALIGNMENT
+                       and MIN_TANGENT_DISTANCE <= distance <= TANGENT_MAX_DISTANCE_FRACTION * scale)}
+
+
+# ---------------------------------------------------------------------------
+# The start/finish bar, drawn across the band through the touch point.
+#
+# The bar is drawn in its own colour rather than the track's white. Drawn white
+# it is invisible: it sits on top of a white stroke, and the only thing marking
+# the spot is then the label. The overhang is what makes it read as crossing the
+# track rather than being part of it, so it is sized off the image instead of the
+# stroke - a few pixels either side of a 9px stroke disappears at a glance.
+START_FINISH_COLOUR = "#FFD200"
+START_FINISH_OVERHANG_FRACTION = 0.010
+MIN_START_FINISH_OVERHANG = 7.0
+TANGENT_SPAN_FRACTION = 0.025
+MIN_TANGENT_SPAN = 18.0
+CROSS_SCAN_FRACTION = 0.05
+
+
+def start_finish_svg(touch, band, geometry, flag_box, orig_w, orig_h, offset_x, offset_y,
+                     colour=START_FINISH_COLOUR, stroke_width=3.0):
+    """The start/finish bar and its label, drawn across the band at the touch point.
+
+    The touch point is on the track's edge line, exactly where the flag's
+    leader meets it. The bar goes through that point: it lies along the
+    normal to the outline there (the tangent comes off the band's densified
+    outline, walked `span` pixels either side so the leader's stump cannot
+    tilt it) and runs from an overhang on the flag's side, across the band,
+    to an overhang on the far side. The band's width is read off it directly
+    by walking the normal until the band ends, so the bar crosses the whole
+    stroke and nothing more.
+    """
     scale = max(orig_w, orig_h)
-    centroid = track_centroid(valid_track_contours, img.shape)
+    span = max(MIN_TANGENT_SPAN, TANGENT_SPAN_FRACTION * scale)
+    contours = [pts.reshape(-1, 1, 2).astype(np.int32) for pts, _ in geometry["outlines"]]
+    tangent = _local_tangent(touch, contours, span)
+    if tangent is None:
+        return []
+    _, (tx, ty) = tangent
+    nx, ny = -ty, tx
+
+    # Point the normal into the band: whichever way from the touch point is
+    # white three pixels on is the way across.
+    def is_band(x, y):
+        xi, yi = int(round(x)), int(round(y))
+        return 0 <= xi < orig_w and 0 <= yi < orig_h and band[yi, xi] > 0
+
+    qx, qy = float(touch[0]), float(touch[1])
+    if not is_band(qx + nx * 3, qy + ny * 3) and is_band(qx - nx * 3, qy - ny * 3):
+        nx, ny = -nx, -ny
+
+    max_scan = max(12.0, CROSS_SCAN_FRACTION * scale)
+    width, t = 0.0, 1.0
+    while t <= max_scan and is_band(qx + nx * t, qy + ny * t):
+        width = t
+        t += 0.5
+    if width <= 0.0:
+        return []
+
+    overhang = max(MIN_START_FINISH_OVERHANG, START_FINISH_OVERHANG_FRACTION * scale)
+    x1 = qx - nx * overhang + offset_x
+    y1 = qy - ny * overhang + offset_y
+    x2 = qx + nx * (width + overhang) + offset_x
+    y2 = qy + ny * (width + overhang) + offset_y
+
+    # The label goes on the flag's side of the track.
+    fx, fy = (flag_box[0] + flag_box[2]) / 2.0, (flag_box[1] + flag_box[3]) / 2.0
+    on_near_side = (nx * (fx - qx) + ny * (fy - qy)) < 0
+    gap = 11.0
+    if on_near_side:
+        label_x, label_y = qx - nx * (overhang + gap) + offset_x, qy - ny * (overhang + gap) + offset_y
+    else:
+        label_x, label_y = qx + nx * (width + overhang + gap) + offset_x, qy + ny * (width + overhang + gap) + offset_y
+
+    return [
+        f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+        f'stroke="{colour}" stroke-width="{stroke_width}" stroke-linecap="butt" />',
+        f'<g fill="{colour}" font-family="sans-serif" font-size="9" font-weight="bold" '
+        'paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">'
+        f'<text x="{label_x:.1f}" y="{label_y + 3.0:.1f}" text-anchor="middle">'
+        'START/FINISH</text></g>',
+    ]
+
+
+AVUS_SVG = """<svg width="1020" height="500" viewBox="0 0 1020 454" xmlns="http://www.w3.org/2000/svg" style="background: #111;">
+<polyline points="766,32 770,36 769,37 768,37 767,38 766,38 765,39 764,39 763,40 761,40 760,41 759,41 758,42 757,42 756,43 754,43 753,44 752,44 751,45 750,45 749,46 748,46 747,47 745,47 744,48 743,48 742,49 741,49 740,50 739,50 738,51 736,51 735,52 734,52 733,53 732,53 731,54 729,54 728,55 727,55 726,56 725,56 724,57 722,57 721,58 720,58 719,59 718,59 717,60 716,60 715,61 713,61 712,62 711,62 710,63 709,63 708,64 707,64 706,65 704,65 703,66 702,66 701,67 699,67 698,68 697,68 696,69 695,69 694,70 693,70 692,71 690,71 689,72 688,72 687,73 686,73 685,74 683,74 682,75 681,75 680,76 679,76 678,77 677,77 676,78 674,78 673,79 672,79 671,80 670,80 669,81 667,81 666,82 665,82 664,83 663,83 662,84 660,84 659,85 658,85 657,86 656,86 655,87 654,87 653,88 651,88 650,89 649,89 648,90 647,90 646,91 644,91 643,92 642,92 641,93 640,93 639,94 637,94 636,95 635,95 634,96 633,96 632,97 631,97 630,98 628,98 627,99 626,99 625,100 624,100 623,101 621,101 620,102 619,102 618,103 616,103 615,104 614,104 613,105 612,105 611,106 610,106 609,107 607,107 606,108 605,108 604,109 603,109 602,110 601,110 600,111 598,111 597,112 596,112 595,113 594,113 593,114 591,114 590,115 589,115 588,116 587,116 586,117 584,117 583,118 582,118 581,119 580,119 579,120 578,120 577,121 575,121 574,122 573,122 572,123 570,123 568,125 566,125 565,126 564,126 563,127 561,127 560,128 559,128 558,129 557,129 556,130 554,130 553,131 552,131 551,132 550,132 549,133 548,133 547,134 546,134 545,135 543,135 542,136 540,136 539,137 538,137 537,138 536,138 535,139 534,139 533,140 531,140 530,141 529,141 528,142 527,142 526,143 525,143 524,144 522,144 521,145 520,145 519,146 518,146 517,147 515,147 514,148 513,148 512,149 511,149 510,150 509,150 508,151 506,151 505,152 504,152 503,153 502,153 501,154 499,154 498,155 497,155 496,156 495,156 494,157 492,157 491,158 490,158 489,159 488,159 487,160 486,160 485,161 483,161 482,162 481,162 480,163 479,163 478,164 476,164 475,165 474,165 473,166 472,166 471,167 469,167 468,168 467,168 466,169 465,169 464,170 463,170 462,171 460,171 459,172 458,172 457,173 456,173 455,174 454,174 453,175 451,175 450,176 449,176 448,177 447,177 446,178 444,178 443,179 442,179 441,180 440,180 439,181 438,181 437,182 435,182 434,183 433,183 432,184 431,184 430,185 429,185 428,186 426,186 425,187 424,187 423,188 422,188 421,189 419,189 418,190 417,190 416,191 415,191 414,192 413,192 412,193 410,193 409,194 408,194 407,195 406,195 405,196 404,196 403,197 402,197 401,198 399,198 398,199 397,199 396,200 395,200 394,201 392,201 391,202 390,202 389,203 388,203 387,204 385,204 384,205 383,205 382,206 381,206 380,207 379,207 378,208 377,208 376,209 374,209 373,210 372,210 371,211 369,211 368,212 367,212 366,213 365,213 364,214 363,214 362,215 361,215 360,216 358,216 357,217 356,217 355,218 354,218 353,219 351,219 350,220 349,220 348,221 347,221 346,222 345,222 344,223 342,223 341,224 340,224 339,225 338,225 337,226 335,226 334,227 333,227 332,228 331,228 330,229 329,229 328,230 327,230 326,231 324,231 323,232 322,232 321,233 320,233 319,234 318,234 317,235 315,235 314,236 313,236 312,237 311,237 310,238 308,238 307,239 306,239 305,240 304,240 303,241 302,241 301,242 299,242 298,243 297,243 296,244 295,244 294,245 293,245 292,246 290,246 289,247 288,247 287,248 286,248 285,249 284,249 283,250 281,250 280,251 279,251 278,252 277,252 276,253 275,253 274,254 272,254 271,255 270,255 269,256 268,256 267,257 266,257 265,258 263,258 262,259 261,259 260,260 259,260 258,261 256,261 255,262 254,262 253,263 252,263 251,264 250,264 249,265 247,265 246,266 245,266 244,267 243,267 242,268 241,268 240,269 238,269 237,270 236,270 235,271 234,271 233,272 231,272 230,273 229,273 228,274 227,274 226,275 225,275 224,276 223,276 222,277 220,277 219,278 218,278 217,279 216,279 215,280 214,280 213,281 212,281 211,282 210,282 209,283 208,283 207,284 206,284 205,285 204,285 203,286 202,286 201,287 200,287 199,288 198,288 197,289 196,289 195,290 194,290 193,291 192,291 191,292 189,292 188,293 187,293 186,294 185,294 184,295 183,295 182,296 181,296 180,297 179,297 178,298 177,298 176,299 175,299 174,300 173,300 172,301 171,301 170,302 169,302 168,303 167,303 166,304 165,304 164,305 163,305 162,306 161,306 160,307 159,307 158,308 157,308 156,309 154,309 153,310 152,310 151,311 150,311 149,312 148,312 147,313 146,313 145,314 144,314 143,315 142,315 141,316 140,316 139,317 138,317 137,318 136,318 135,319 134,319 133,320 132,320 131,321 130,321 129,322 128,322 127,323 126,323 125,324 123,324 122,325 121,325 120,326 119,326 118,327 117,327 116,328 115,328 114,329 113,329 112,330 111,330 110,331 109,331 108,332 107,332 106,333 105,333 104,334 103,334 102,335 101,335 100,336 99,336 98,337 97,337 96,338 95,338 94,339 93,339 92,340 91,340 90,341 89,341 88,342 87,342 86,343 84,343 83,344 82,344 81,345 80,345 79,346 78,346 77,347 76,347 75,348 74,348 73,349 72,349 71,350 70,350 69,351 68,351 67,352 66,352 65,353 64,353 63,354 62,354 61,355 60,355 59,356 58,356 57,357 55,357 54,358 53,358 52,359 50,359 49,360 47,360 46,361 44,361 43,362 41,362 40,363 37,363 36,364 34,364 33,365 32,365 31,366 29,366 28,367 26,367 24,369 23,369 22,370 21,370 19,372 19,373 18,374 18,381 19,382 19,383 20,384 20,385 21,385 22,386 24,386 25,387 38,387 39,386 42,386 43,385 44,385 45,384 46,384 47,383 48,383 49,382 50,382 51,381 52,381 53,380 54,380 55,379 56,379 57,378 58,378 59,377 60,377 61,376 62,376 63,375 65,375 66,374 67,374 68,373 69,373 70,372 71,372 72,371 73,371 74,370 75,370 76,369 77,369 78,368 79,368 80,367 81,367 82,366 83,366 84,365 85,365 86,364 87,364 88,363 89,363 90,362 91,362 92,361 93,361 94,360 95,360 96,359 97,359 98,358 99,358 100,357 101,357 102,356 103,356 104,355 106,355 107,354 108,354 109,353 110,353 111,352 112,352 113,351 114,351 115,350 116,350 117,349 118,349 119,348 120,348 121,347 122,347 123,346 124,346 125,345 126,345 127,344 128,344 129,343 130,343 131,342 132,342 133,341 134,341 135,340 136,340 137,339 138,339 139,338 140,338 141,337 142,337 143,336 144,336 145,335 147,335 148,334 149,334 150,333 151,333 152,332 153,332 154,331 155,331 156,330 157,330 158,329 159,329 160,328 161,328 162,327 163,327 164,326 165,326 166,325 167,325 168,324 169,324 170,323 171,323 172,322 173,322 174,321 175,321 176,320 177,320 178,319 179,319 180,318 181,318 182,317 184,317 186,315 188,315 189,314 190,314 191,313 192,313 193,312 194,312 195,311 196,311 197,310 198,310 199,309 200,309 201,308 202,308 203,307 204,307 205,306 206,306 207,305 208,305 209,304 210,304 211,303 212,303 213,302 214,302 215,301 216,301 217,300 218,300 219,299 220,299 221,298 222,298 223,297 224,297 225,296 226,296 227,295 228,295 229,294 230,294 231,293 233,293 234,292 235,292 236,291 237,291 238,290 239,290 240,289 242,289 243,288 244,288 245,287 246,287 247,286 249,286 250,285 251,285 252,284 253,284 254,283 255,283 256,282 258,282 259,281 260,281 261,280 262,280 263,279 264,279 265,278 267,278 268,277 269,277 270,276 271,276 272,275 274,275 275,274 276,274 277,273 278,273 279,272 280,272 281,271 283,271 284,270 285,270 286,269 287,269 288,268 290,268 291,267 292,267 293,266 294,266 295,265 297,265 298,264 299,264 300,263 301,263 302,262 304,262 305,261 306,261 307,260 308,260 309,259 310,259 311,258 313,258 314,257 315,257 316,256 317,256 318,255 320,255 321,254 322,254 323,253 324,253 325,252 327,252 328,251 329,251 330,250 331,250 332,249 333,249 334,248 336,248 337,247 338,247 339,246 340,246 341,245 343,245 344,244 345,244 346,243 347,243 348,242 349,242 350,241 352,241 353,240 354,240 355,239 356,239 357,238 358,238 359,237 361,237 362,236 363,236 364,235 366,235 367,234 368,234 369,233 370,233 371,232 372,232 373,231 375,231 376,230 377,230 378,229 379,229 380,228 381,228 382,227 384,227 385,226 386,226 387,225 388,225 389,224 391,224 392,223 393,223 394,222 395,222 396,221 397,221 398,220 400,220 401,219 402,219 403,218 404,218 405,217 406,217 407,216 409,216 410,215 411,215 412,214 413,214 414,213 416,213 417,212 418,212 419,211 420,211 421,210 423,210 424,209 425,209 426,208 427,208 428,207 429,207 430,206 432,206 433,205 434,205 435,204 436,204 437,203 439,203 440,202 441,202 442,201 443,201 444,200 445,200 446,199 448,199 449,198 450,198 451,197 452,197 453,196 455,196 456,195 457,195 458,194 459,194 460,193 462,193 463,192 464,192 465,191 466,191 467,190 468,190 469,189 471,189 472,188 473,188 474,187 475,187 476,186 477,186 478,185 480,185 481,184 482,184 483,183 484,183 485,182 487,182 488,181 489,181 490,180 491,180 492,179 494,179 495,178 496,178 497,177 498,177 499,176 500,176 501,175 503,175 504,174 505,174 506,173 507,173 508,172 510,172 511,171 512,171 513,170 515,170 516,169 517,169 518,168 519,168 520,167 521,167 522,166 524,166 525,165 526,165 527,164 529,164 530,163 531,163 532,162 533,162 534,161 536,161 537,160 538,160 539,159 540,159 541,158 543,158 544,157 545,157 546,156 547,156 548,155 550,155 551,154 552,154 553,153 554,153 555,152 556,152 557,151 558,151 559,150 561,150 562,149 563,149 564,148 566,148 567,147 568,147 569,146 570,146 571,145 572,145 573,144 575,144 576,143 577,143 578,142 579,142 580,141 582,141 583,140 584,140 585,139 586,139 587,138 588,138 589,137 591,137 592,136 593,136 594,135 595,135 596,134 597,134 598,133 600,133 601,132 602,132 603,131 605,131 606,130 607,130 608,129 609,129 610,128 611,128 612,127 614,127 615,126 616,126 617,125 618,125 619,124 621,124 622,123 623,123 624,122 625,122 626,121 628,121 629,120 630,120 631,119 632,119 633,118 635,118 636,117 637,117 638,116 639,116 640,115 642,115 643,114 644,114 645,113 646,113 647,112 648,112 649,111 651,111 652,110 653,110 654,109 655,109 656,108 658,108 659,107 660,107 661,106 662,106 663,105 665,105 666,104 667,104 668,103 669,103 670,102 672,102 673,101 674,101 675,100 676,100 677,99 678,99 679,98 681,98 682,97 683,97 684,96 686,96 687,95 688,95 689,94 690,94 691,93 692,93 693,92 694,92 695,91 697,91 698,90 699,90 700,89 701,89 702,88 704,88 705,87 706,87 707,86 709,86 710,85 711,85 712,84 713,84 714,83 715,83 716,82 718,82 719,81 720,81 721,80 722,80 723,79 725,79 726,78 727,78 728,77 729,77 730,76 732,76 733,75 734,75 735,74 736,74 737,73 739,73 740,72 741,72 742,71 743,71 744,70 745,70 746,69 748,69 749,68 750,68 751,67 752,67 753,66 755,66 756,65 757,65 758,64 759,64 760,63 761,63 762,62 764,62 765,61 766,61 767,60 769,60 770,59 771,59 772,58 773,58 774,57 775,57 776,56 779,56 780,55 783,55 784,54 787,54 788,53 791,53 792,52 797,52 798,53 799,52 804,52 805,53 809,53 810,54 814,54 815,55 818,55 819,56 821,56 822,57 824,57 825,58 828,58 829,59 831,59 832,60 834,60 835,61 837,61 838,62 840,62 841,63 843,63 844,64 847,64 848,65 850,65 851,66 855,66 856,67 869,67 870,66 872,66 875,63 876,63 878,61 878,60 879,59 879,58 881,56 881,53 882,52 882,40 881,39 881,38 880,37 880,36 879,35 879,34 878,33 878,32 872,26 871,26 868,23 867,23 866,22 864,22 863,21 860,21 859,20 833,20 832,21 826,21 825,22 820,22 819,23 814,23 813,24 810,24 809,25 806,25 805,26 803,26 802,27 798,27 797,28 795,28 794,29 792,29 791,30 788,30 787,31 785,31 784,32 783,32 782,33 780,33 779,34 776,34 775,35 773,35 772,36" fill="none" stroke="white" stroke-width="9" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="766,32 770,36 769,37 768,37 767,38 766,38 765,39 764,39 763,40 761,40 760,41 759,41 758,42 757,42 756,43 754,43 753,44 752,44 751,45 750,45 749,46 748,46 747,47 745,47 744,48 743,48 742,49 741,49 740,50 739,50 738,51 736,51 735,52 734,52 733,53 732,53 731,54 729,54 728,55 727,55 726,56 725,56 724,57 722,57 721,58 720,58 719,59 718,59 717,60 716,60 715,61 713,61 712,62 711,62 710,63 709,63 708,64 707,64 706,65 704,65 703,66 702,66 701,67 699,67 698,68 697,68 696,69 695,69 694,70 693,70 692,71 690,71 689,72 688,72 687,73 686,73 685,74 683,74 682,75 681,75 680,76 679,76 678,77 677,77 676,78 674,78 673,79 672,79 671,80 670,80 669,81 667,81 666,82 665,82 664,83 663,83 662,84 660,84 659,85 658,85 657,86 656,86 655,87 654,87 653,88 651,88 650,89 649,89 648,90 647,90 646,91 644,91 643,92 642,92 641,93 640,93 639,94 637,94 636,95 635,95 634,96 633,96 632,97 631,97 630,98 628,98 627,99 626,99 625,100 624,100 623,101 621,101 620,102 619,102 618,103 616,103 615,104 614,104 613,105 612,105 611,106 610,106 609,107 607,107 606,108 605,108 604,109 603,109 602,110 601,110 600,111 598,111 597,112 596,112 595,113 594,113 593,114 591,114 590,115 589,115 588,116 587,116 586,117 584,117 583,118 582,118 581,119 580,119 579,120 578,120 577,121 575,121 574,122 573,122 572,123 570,123 568,125 566,125 565,126 564,126 563,127 561,127 560,128 559,128 558,129 557,129 556,130 554,130 553,131 552,131 551,132 550,132 549,133 548,133 547,134 546,134 545,135 543,135 542,136 540,136 539,137 538,137 537,138 536,138 535,139 534,139 533,140 531,140 530,141 529,141 528,142 527,142 526,143 525,143 524,144 522,144 521,145 520,145 519,146 518,146 517,147 515,147 514,148 513,148 512,149 511,149 510,150 509,150 508,151 506,151 505,152 504,152 503,153 502,153 501,154 499,154 498,155 497,155 496,156 495,156 494,157 492,157 491,158 490,158 489,159 488,159 487,160 486,160 485,161 483,161 482,162 481,162 480,163 479,163 478,164 476,164 475,165 474,165 473,166 472,166 471,167 469,167 468,168 467,168 466,169 465,169 464,170 463,170 462,171 460,171 459,172 458,172 457,173 456,173 455,174 454,174 453,175 451,175 450,176 449,176 448,177 447,177 446,178 444,178 443,179 442,179 441,180 440,180 439,181 438,181 437,182 435,182 434,183 433,183 432,184 431,184 430,185 429,185 428,186 426,186 425,187 424,187 423,188 422,188 421,189 419,189 418,190 417,190 416,191 415,191 414,192 413,192 412,193 410,193 409,194 408,194 407,195 406,195 405,196 404,196 403,197 402,197 401,198 399,198 398,199 397,199 396,200 395,200 394,201 392,201 391,202 390,202 389,203 388,203 387,204 385,204 384,205 383,205 382,206 381,206 380,207 379,207 378,208 377,208 376,209 374,209 373,210 372,210 371,211 369,211 368,212 367,212 366,213 365,213 364,214 363,214 362,215 361,215 360,216 358,216 357,217 356,217 355,218 354,218 353,219 351,219 350,220 349,220 348,221 347,221 346,222 345,222 344,223 342,223 341,224 340,224 339,225 338,225 337,226 335,226 334,227 333,227 332,228 331,228 330,229 329,229 328,230 327,230 326,231 324,231 323,232 322,232 321,233 320,233 319,234 318,234 317,235 315,235 314,236 313,236 312,237 311,237 310,238 308,238 307,239 306,239 305,240 304,240 303,241 302,241 301,242 299,242 298,243 297,243 296,244 295,244 294,245 293,245 292,246 290,246 289,247 288,247 287,248 286,248 285,249 284,249 283,250 281,250 280,251 279,251 278,252 277,252 276,253 275,253 274,254 272,254 271,255 270,255 269,256 268,256 267,257 266,257 265,258 263,258 262,259 261,259 260,260 259,260 258,261 256,261 255,262 254,262 253,263 252,263 251,264 250,264 249,265 247,265 246,266 245,266 244,267 243,267 242,268 241,268 240,269 238,269 237,270 236,270 235,271 234,271 233,272 231,272 230,273 229,273 228,274 227,274 226,275 225,275 224,276 223,276 222,277 220,277 219,278 218,278 217,279 216,279 215,280 214,280 213,281 212,281 211,282 210,282 209,283 208,283 207,284 206,284 205,285 204,285 203,286 202,286 201,287 200,287 199,288 198,288 197,289 196,289 195,290 194,290 193,291 192,291 191,292 189,292 188,293 187,293 186,294 185,294 184,295 183,295 182,296 181,296 180,297 179,297 178,298 177,298 176,299 175,299 174,300 173,300 172,301 171,301 170,302 169,302 168,303 167,303 166,304 165,304 164,305 163,305 162,306 161,306 160,307 159,307 158,308 157,308 156,309 154,309 153,310 152,310 151,311 150,311 149,312 148,312 147,313 146,313 145,314 144,314 143,315 142,315 141,316 140,316 139,317 138,317 137,318 136,318 135,319 134,319 133,320 132,320 131,321 130,321 129,322 128,322 127,323 126,323 125,324 123,324 122,325 121,325 120,326 119,326 118,327 117,327 116,328 115,328 114,329 113,329 112,330 111,330 110,331 109,331 108,332 107,332 106,333 105,333 104,334 103,334 102,335 101,335 100,336 99,336 98,337 97,337 96,338 95,338 94,339 93,339 92,340 91,340 90,341 89,341 88,342 87,342 86,343 84,343 83,344 82,344 81,345 80,345 79,346 78,346 77,347 76,347 75,348 74,348 73,349 72,349 71,350 70,350 69,351 68,351 67,352 66,352 65,353 64,353 63,354 62,354 61,355 60,355 59,356 58,356 57,357 55,357 54,358 53,358 52,359 50,359 49,360 47,360 46,361 44,361 43,362 41,362 40,363 37,363 36,364 34,364 33,365 32,365 31,366 29,366 28,367 26,367 24,369 23,369 22,370 21,370 19,372 19,373 18,374 18,381 19,382 19,383 20,384 20,385 21,385 22,386 24,386 25,387 38,387 39,386 42,386 43,385 44,385 45,384 46,384 47,383 48,383 49,382 50,382 51,381 52,381 53,380 54,380 55,379 56,379 57,378 58,378 59,377 60,377 61,376 62,376 63,375 65,375 66,374 67,374 68,373 69,373 70,372 71,372 72,371 73,371 74,370 75,370 76,369 77,369 78,368 79,368 80,367 81,367 82,366 83,366 84,365 85,365 86,364 87,364 88,363 89,363 90,362 91,362 92,361 93,361 94,360 95,360 96,359 97,359 98,358 99,358 100,357 101,357 102,356 103,356 104,355 106,355 107,354 108,354 109,353 110,353 111,352 112,352 113,351 114,351 115,350 116,350 117,349 118,349 119,348 120,348 121,347 122,347 123,346 124,346 125,345 126,345 127,344 128,344 129,343 130,343 131,342 132,342 133,341 134,341 135,340 136,340 137,339 138,339 139,338 140,338 141,337 142,337 143,336 144,336 145,335 147,335 148,334 149,334 150,333 151,333 152,332 153,332 154,331 155,331 156,330 157,330 158,329 159,329 160,328 161,328 162,327 163,327 164,326 165,326 166,325 167,325 168,324 169,324 170,323 171,323 172,322 173,322 174,321 175,321 176,320 177,320 178,319 179,319 180,318 181,318 182,317 184,317 186,315 188,315 189,314 190,314 191,313 192,313 193,312 194,312 195,311 196,311 197,310 198,310 199,309 200,309 201,308 202,308 203,307 204,307 205,306 206,306 207,305 208,305 209,304 210,304 211,303 212,303 213,302 214,302 215,301 216,301 217,300 218,300 219,299 220,299 221,298 222,298 223,297 224,297 225,296 226,296 227,295 228,295 229,294 230,294 231,293 233,293 234,292 235,292 236,291 237,291 238,290 239,290 240,289 242,289 243,288 244,288 245,287 246,287 247,286 249,286 250,285 251,285 252,284 253,284 254,283 255,283 256,282 258,282 259,281 260,281 261,280 262,280 263,279 264,279 265,278 267,278 268,277 269,277 270,276 271,276 272,275 274,275 275,274 276,274 277,273 278,273 279,272 280,272 281,271 283,271 284,270 285,270 286,269 287,269 288,268 290,268 291,267 292,267 293,266 294,266 295,265 297,265 298,264 299,264 300,263 301,263 302,262 304,262 305,261 306,261 307,260 308,260 309,259 310,259 311,258 313,258 314,257 315,257 316,256 317,256 318,255 320,255 321,254 322,254 323,253 324,253 325,252 327,252 328,251 329,251 330,250 331,250 332,249 333,249 334,248 336,248 337,247 338,247 339,246 340,246 341,245 343,245 344,244 345,244 346,243 347,243 348,242 349,242 350,241 352,241 353,240 354,240 355,239 356,239 357,238 358,238 359,237 361,237 362,236 363,236 364,235 366,235 367,234 368,234 369,233 370,233 371,232 372,232 373,231 375,231 376,230 377,230 378,229 379,229 380,228 381,228 382,227 384,227 385,226 386,226 387,225 388,225 389,224 391,224 392,223 393,223 394,222 395,222 396,221 397,221 398,220 400,220 401,219 402,219 403,218 404,218 405,217 406,217 407,216 409,216 410,215 411,215 412,214 413,214 414,213 416,213 417,212 418,212 419,211 420,211 421,210 423,210 424,209 425,209 426,208 427,208 428,207 429,207 430,206 432,206 433,205 434,205 435,204 436,204 437,203 439,203 440,202 441,202 442,201 443,201 444,200 445,200 446,199 448,199 449,198 450,198 451,197 452,197 453,196 455,196 456,195 457,195 458,194 459,194 460,193 462,193 463,192 464,192 465,191 466,191 467,190 468,190 469,189 471,189 472,188 473,188 474,187 475,187 476,186 477,186 478,185 480,185 481,184 482,184 483,183 484,183 485,182 487,182 488,181 489,181 490,180 491,180 492,179 494,179 495,178 496,178 497,177 498,177 499,176 500,176 501,175 503,175 504,174 505,174 506,173 507,173 508,172 510,172 511,171 512,171 513,170 515,170 516,169 517,169 518,168 519,168 520,167 521,167 522,166 524,166 525,165 526,165 527,164 529,164 530,163 531,163 532,162 533,162 534,161 536,161 537,160 538,160 539,159 540,159 541,158 543,158 544,157 545,157 546,156 547,156 548,155 550,155 551,154 552,154 553,153 554,153 555,152 556,152 557,151 558,151 559,150 561,150 562,149 563,149 564,148 566,148 567,147 568,147 569,146 570,146 571,145 572,145 573,144 575,144 576,143 577,143 578,142 579,142 580,141 582,141 583,140 584,140 585,139 586,139 587,138 588,138 589,137 591,137 592,136 593,136 594,135 595,135 596,134 597,134 598,133 600,133 601,132 602,132 603,131 605,131 606,130 607,130 608,129 609,129 610,128 611,128 612,127 614,127 615,126 616,126 617,125 618,125 619,124 621,124 622,123 623,123 624,122 625,122 626,121 628,121 629,120 630,120 631,119 632,119 633,118 635,118 636,117 637,117 638,116 639,116 640,115 642,115 643,114 644,114 645,113 646,113 647,112 648,112 649,111 651,111 652,110 653,110 654,109 655,109 656,108 658,108 659,107 660,107 661,106 662,106 663,105 665,105 666,104 667,104 668,103 669,103 670,102 672,102 673,101 674,101 675,100 676,100 677,99 678,99 679,98 681,98 682,97 683,97 684,96 686,96 687,95 688,95 689,94 690,94 691,93 692,93 693,92 694,92 695,91 697,91 698,90 699,90 700,89 701,89 702,88 704,88 705,87 706,87 707,86 709,86 710,85 711,85 712,84 713,84 714,83 715,83 716,82 718,82 719,81 720,81 721,80 722,80 723,79 725,79 726,78 727,78 728,77 729,77 730,76 732,76 733,75 734,75 735,74 736,74 737,73 739,73 740,72 741,72 742,71 743,71 744,70 745,70 746,69 748,69 749,68 750,68 751,67 752,67 753,66 755,66 756,65 757,65 758,64 759,64 760,63 761,63 762,62 764,62 765,61 766,61 767,60 769,60 770,59 771,59 772,58 773,58 774,57 775,57 776,56 779,56 780,55 783,55 784,54 787,54 788,53 791,53 792,52 797,52 798,53 799,52 804,52 805,53 809,53 810,54 814,54 815,55 818,55 819,56 821,56 822,57 824,57 825,58 828,58 829,59 831,59 832,60 834,60 835,61 837,61 838,62 840,62 841,63 843,63 844,64 847,64 848,65 850,65 851,66 855,66 856,67 869,67 870,66 872,66 875,63 876,63 878,61 878,60 879,59 879,58 881,56 881,53 882,52 882,40 881,39 881,38 880,37 880,36 879,35 879,34 878,33 878,32 872,26 871,26 868,23 867,23 866,22 864,22 863,21 860,21 859,20 833,20 832,21 826,21 825,22 820,22 819,23 814,23 813,24 810,24 809,25 806,25 805,26 803,26 802,27 798,27 797,28 795,28 794,29 792,29 791,30 788,30 787,31 785,31 784,32 783,32 782,33 780,33 779,34 776,34 775,35 773,35 772,36" fill="none" stroke="#111111" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<line x1="762.7" y1="29.8" x2="775.3" y2="38.2" stroke="#FFD200" stroke-width="3.0" stroke-linecap="butt" />
+<g fill="#FFD200" font-family="sans-serif" font-size="9" font-weight="bold" paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round"><text x="779.0" y="19.0" text-anchor="middle">START/FINISH</text></g>
+<line x1="745.7" y1="21.5" x2="734.5" y2="25.9" stroke="#E10600" stroke-width="3.0" stroke-linecap="round" />
+<polygon points="727.1,28.9 733.0,22.2 736.0,29.7" fill="#E10600" />
+<g fill="#FFFFFF" font-family="sans-serif" font-size="12" font-weight="bold" paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">
+<text x="850" y="0">Nordschleife</text>
+<text x="0" y="420">Sudkehre</text>
+</g>
+</svg>"""
+
+
+AVUS_IMAGE_URL = "https://www.statsf1.com/images/GetImage.ashx?id=piste.avus"
+
+SVG_OFFSET_X, SVG_OFFSET_Y = 50, 25
+TRACK_CONTOUR_MIN_AREA = 100
+TRACK_CONTOUR_EPSILON = 0.8
+
+
+def _svg_text(text):
+    return html.escape(text, quote=True)
+
+
+def _opposing(first, second):
+    return (first is not None and second is not None
+            and first["direction"] != second["direction"])
+
+
+def generate_track_svg(image_path, grand_prix_dates=None, image_bytes=None):
+    """(svg, TrackDirection) for one statsf1 layout map.
+
+    `image_path` is the map's URL and is always used to identify the layout
+    (it carries the piste id the override tables key on). Pass `image_bytes`
+    to read a locally cached copy of the map instead of fetching it, which is
+    how a regeneration run avoids hammering statsf1.
+    """
+    if image_path == AVUS_IMAGE_URL:
+        # The AVUS map is a pair of straights with a banked loop at each end,
+        # too far from every other map's shape for the tracer; hand-drawn.
+        return AVUS_SVG, "Anticlockwise"
+
+    if image_bytes is None:
+        img, _ = imread_from_url(image_path)
+    else:
+        img = decode_layout_image(image_bytes, image_path)
+
+    orig_h, orig_w = img.shape[:2]
+    h, w = orig_h + 2 * SVG_OFFSET_Y, orig_w + 2 * SVG_OFFSET_X
+    scale = max(orig_w, orig_h)
+    pid = layout_id(image_path) or image_path
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    white = white_mask_of(gray)
+    erase_watermark(white)
+    untouched_area = enclosed_area(track_band(white))
+
+    # 1. The flag and its leader, cut out of the mask before anything is traced.
+    flag_score, flag_box = find_chequered_flag(gray)
+    flag_found = flag_score >= FLAG_MATCH_THRESHOLD
+    leader = None
+    if flag_found:
+        leader = find_start_finish_touch(gray, flag_box)
+        erase_flag_and_leader(white, flag_box, leader)
+        if leader is None:
+            print(f"  {pid}: chequered flag found (score {flag_score:.2f}) but no leader line "
+                  f"reaches the track from it - no start/finish bar drawn.")
+        elif leader["glued"]:
+            print(f"  {pid}: flag sits against the track; start/finish taken at the nearest "
+                  f"corner, {abs(leader['touch'][0] - leader['corner'][0])}px out.")
+    else:
+        print(f"  WARNING: {pid}: no chequered flag matched (best score {flag_score:.2f}) - "
+              f"no start/finish bar drawn.")
+
+    # 2. The arrows, off the original colours, gated on distance to the band.
+    band = track_band(white)
+    arrows = detect_arrows(img, track_mask=band, white_mask=white)
+    for _, _, box in arrows:
+        erase_components_in_box(white, box, margin=4,     # the arrow's white outline
+                                touching_max_area=TEXT_MAX_GLYPH_AREA)
+
+    # 3. Text: glyphs erased from the mask so they are not traced as track;
+    #    the labels themselves come off the cross-checked OCR.
+    exclude = [box for _, _, box in arrows]
+    if flag_found:
+        exclude.append(flag_box)
+    text_boxes, glyph_mask = find_text_lines(white, exclude)
+    white_with_text = white.copy()
+    for x, y, bw, bh in text_boxes:
+        erase_components_in_box(white, (x, y, x + bw, y + bh), margin=2)
+    labels = read_map_labels(img, pid, glyph_mask, white_with_text)
+
+    # 4. Geometry off the cleaned mask.
+    band = track_band(white)
+    geometry = band_geometry(band, reference_area=untouched_area)
+    if geometry is not None and not geometry["closed"]:
+        print(f"  WARNING: {pid}: the traced track is not a closed loop; the direction "
+              f"is read off the centroid instead of the outline.")
+    band_contours, _ = cv2.findContours(band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    centroid = track_centroid(list(band_contours), img.shape)
+
+    # 5. Direction. The tangent reading is the answer; the centroid reading is
+    #    kept as a cross-check and only ever printed.
     arrow_length = max(MIN_ARROW_LENGTH, ARROW_LENGTH_FRACTION * scale)
-    # The traced circuit, as a mask, so a red blob far from it - a rooftop in the
-    # corner of an aerial photo - cannot be mistaken for an arrow.
-    arrow_track_mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    cv2.drawContours(arrow_track_mask, valid_track_contours, -1, 255, -1)
-    readings = []
-    for base, tip in detect_arrows(img, track_mask=arrow_track_mask):
+    glyphs = []
+    for base, tip, _ in arrows:
         ends = arrow_endpoints(base, tip, arrow_length)
         if ends is None:
             continue
         base, tip = ends
-        svg_elements.extend(arrow_svg(
-            base, tip, OFFSET_X, OFFSET_Y,
-            head_length=arrow_length * ARROW_HEAD_FRACTION))
-        if centroid is not None:
-            readings.append(arrow_direction(base, tip, centroid, scale))
-    direction = resolve_circuit_direction(readings)
+        tangent = tangent_direction(geometry, base, tip, scale)
+        radial = arrow_direction(base, tip, centroid, scale) if centroid is not None else None
+        glyphs.append((base, tip, tangent, radial))
+    # statsf1 only draws a second arrow to say the layout was raced the other
+    # way round, so a second glyph that agrees with the first is not an arrow.
+    if len(glyphs) == 2:
+        first, second = glyphs[0][2], glyphs[1][2]
+        if not (first and second and first["usable"] and second["usable"] and _opposing(first, second)):
+            print(f"  {pid}: second red shape dropped - it does not oppose the first arrow.")
+            del glyphs[1]
 
-    # The hand-set table wins wherever it has an entry. It is not a fallback for
-    # the NULL case alone: the reading it most needs to correct, Dallas, is one
-    # the detector resolves confidently and gets backwards, so consulting the
-    # table only when the detector gave up would leave exactly that class of
-    # error in place.
-    # The years a layout raced settle it outright where Wikipedia records a
-    # direction per era, so that is consulted before the hand-set table: it is
-    # derived from data the caller already has rather than maintained by hand,
-    # and it is the only thing that can tell two layouts of one circuit apart.
-    pid = layout_id(image_path)
-    from_era = direction_for_years(WIKI_DIRECTION_ERAS.get(pid),
-                                   years_from_dates(grand_prix_dates))
+    tangent_readings = [t for _, _, t, _ in glyphs if t and t["usable"]]
+    radial_readings = [r for _, _, _, r in glyphs if r]
+    direction = resolve_circuit_direction([{"direction": t["direction"], "usable": True}
+                                           for t in tangent_readings])
+    radial_direction = resolve_circuit_direction(radial_readings)
+    if direction is None and radial_direction is not None:
+        print(f"  {pid}: tangent reading unusable, falling back to the centroid reading.")
+        direction = radial_direction
+    elif radial_direction is not None and radial_direction != direction:
+        print(f"  {pid}: centroid reading ({radial_direction}) disagrees with the tangent "
+              f"reading ({direction}); the tangent reading is kept.")
+
+    from_era = direction_for_years(WIKI_DIRECTION_ERAS.get(pid), years_from_dates(grand_prix_dates))
     if from_era is not None:
         if direction is not None and direction != from_era:
-            print(f"  TrackDirection: detector read {direction}, corrected to "
-                  f"{from_era} from the years {pid} was raced.")
+            print(f"  TrackDirection: detector read {direction}, corrected to {from_era} "
+                  f"from the years {pid} was raced.")
         direction = from_era
-
     override = DIRECTION_OVERRIDES.get(pid)
     if override is not None:
         if direction is not None and direction != override:
-            print(f"  TrackDirection: detector read {direction}, overridden to "
-                  f"{override} by DIRECTION_OVERRIDES.")
+            print(f"  TrackDirection: detector read {direction}, overridden to {override} "
+                  f"by DIRECTION_OVERRIDES.")
         direction = override
-
     if direction is None:
-        print(f"  WARNING: TrackDirection could NOT be determined for "
-              f"{layout_id(image_path) or image_path} - storing NULL. "
-              f"{len(readings)} arrow reading(s), none usable. "
-              f"Add an entry to DIRECTION_OVERRIDES to fill it.")
+        print(f"  WARNING: TrackDirection could NOT be determined for {pid} - storing NULL. "
+              f"{len(glyphs)} arrow(s), none readable. Add an entry to DIRECTION_OVERRIDES.")
 
-    # The bar goes in with the track rather than after it: it belongs under the
-    # corner names, and it is traced off the same contours, so it is only
-    # meaningful next to them.
-    if flag_line_box:
-        track_elements.extend(
-            start_finish_svg(flag_line_box, flag_box, track_mask,
-                             valid_track_contours, centroid,
-                             orig_w, orig_h, OFFSET_X, OFFSET_Y)
+    # 6. Draw: track first, then the bar, then arrows, then the names on top.
+    elements = ['<g fill="none" stroke="white" stroke-width="4">']
+    contours, _ = cv2.findContours(white, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        if cv2.contourArea(cnt) < TRACK_CONTOUR_MIN_AREA:
+            continue
+        approx = cv2.approxPolyDP(cnt, TRACK_CONTOUR_EPSILON, True)
+        points = " ".join(f"{int(p[0][0]) + SVG_OFFSET_X},{int(p[0][1]) + SVG_OFFSET_Y}" for p in approx)
+        elements.append(f'<polyline points="{points}" />')
+    elements.append('</g>')
+
+    if leader is not None and geometry is not None:
+        elements.extend(start_finish_svg(leader["touch"], band, geometry, flag_box,
+                                         orig_w, orig_h, SVG_OFFSET_X, SVG_OFFSET_Y))
+
+    for base, tip, _, _ in glyphs:
+        elements.extend(arrow_svg(base, tip, SVG_OFFSET_X, SVG_OFFSET_Y,
+                                  head_length=arrow_length * ARROW_HEAD_FRACTION))
+
+    elements.append('<g fill="#FFFFFF" font-family="sans-serif" font-size="12" font-weight="bold" '
+                    'paint-order="stroke fill" stroke="#111111" stroke-width="3px" stroke-linejoin="round">')
+    review = 0
+    for label in labels:
+        raw_center_x, raw_center_y = (int(v) for v in _centre(label["box"]))
+        shifted_x = raw_center_x + SVG_OFFSET_X
+        shifted_y = raw_center_y + SVG_OFFSET_Y
+        flag_attr = ""
+        if label["review"]:
+            review += 1
+            flag_attr = f' data-review="1" data-alt="{_svg_text(label["alt"])}"'
+        elements.append(
+            f'  <text x="{shifted_x}" y="{shifted_y + 4}" text-anchor="middle"{flag_attr}>{_svg_text(label["text"])}</text>'
         )
+    elements.append('</g>')
 
-    svg_elements = track_elements + svg_elements
+    if leader is None:
+        start_finish = "missing"
+    elif leader["glued"]:
+        start_finish = "glued"
+    else:
+        start_finish = "exact"
+    tangent_text = ",".join(t["direction"] for t in tangent_readings) or "none"
+    svg = (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
+           f'style="background: #111;" data-flag-score="{flag_score:.2f}" '
+           f'data-start-finish="{start_finish}" data-arrows="{len(glyphs)}" '
+           f'data-direction-tangent="{tangent_text}" data-direction-centroid="{radial_direction or "none"}" '
+           f'data-labels="{len(labels)}" data-labels-review="{review}">\n')
+    svg += "".join(f"  {element}\n" for element in elements)
+    svg += "</svg>"
+    return svg, direction
 
-    for element in svg_elements:
-        svg_content += f"  {element}\n"
-    svg_content += '</svg>'
-
-    if os.path.exists("vlm_inference_ready.png"):
-        os.remove("vlm_inference_ready.png")    
-    if os.path.exists("vlm_p2_inference_ready.png"):
-        os.remove("vlm_p2_inference_ready.png")
-    return svg_content, direction
 
 import sqlite3
 from bs4 import BeautifulSoup
@@ -1564,17 +2512,27 @@ def clean_circuittype_bullet(li):
     ).strip()
 
 
-def parse_circuit_metadata(soup):
+def parse_circuit_metadata(soup, fallback_name=None):
+    """(official circuit name, track type) off a statsf1 circuit page.
+
+    The circuittype box lists the official name first and the track type
+    after it - but only when statsf1 has an official name to give. Pescara,
+    Bremgarten, Dijon, the Hungaroring and a dozen others open straight with
+    "Permanent track", and taking bullet 0 blindly stored that as the name of
+    twenty layouts. So bullet 0 is the name only when it is not the track-type
+    bullet; otherwise `fallback_name` (the circuit's name on the circuits
+    list) is used, and the run fails loudly if there is no fallback either.
+    """
     circuittype_items = soup.find('div', class_='circuittype').find_all('li')
-    official_circuit_name = None
-    raw_track_type = None
-    for item in circuittype_items:
-        if "track" in clean_circuittype_bullet(item).lower():
-            raw_track_type = clean_circuittype_bullet(item)
-            if not circuittype_items[0] == item:
-                official_circuit_name = clean_circuittype_bullet(circuittype_items[0])
-            break
-    official_circuit_name = clean_circuittype_bullet(circuittype_items[0])
+    bullets = [clean_circuittype_bullet(item) for item in circuittype_items]
+    raw_track_type = next(b for b in bullets if "track" in b.lower())
+    if bullets[0] == raw_track_type:
+        official_circuit_name = fallback_name
+    else:
+        official_circuit_name = bullets[0]
+    if not official_circuit_name:
+        raise ValueError("Circuit page carries no official name and no fallback was given")
+    official_circuit_name = re.sub(r'\s+', ' ', official_circuit_name).strip()
     return official_circuit_name, TRACK_TYPE_MAP[raw_track_type]
 
 
@@ -1637,8 +2595,7 @@ if __name__ == "__main__":
     open_url("https://www.statsf1.com/en/circuits.aspx")
     table = soup.find('table')
     trs = table.find_all('tr')
-    c = 73
-    for tr in trs[1:-1][73:]:
+    for tr in trs[1:-1]:
         p = tr.find_all('td')[0]
         v = p.find('a')
         print ("Processing circuit: ", v.get_text(strip=True))
@@ -1651,7 +2608,7 @@ if __name__ == "__main__":
         lat, lng = coord_str
         lat = parse_coordinate(lat)
         lng = parse_coordinate(lng)
-        official_circuit_name, track_type = parse_circuit_metadata(soup)
+        official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=v.get_text(strip=True))
         circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
         for layoutdiv in circuitlayoutdivs:
             circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')

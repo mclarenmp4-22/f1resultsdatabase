@@ -24,4 +24,4 @@ For schema, please refer to README.md
 2. When creating a new column or table, always add it to the README.md and reset.py
 3. Always before assuming anything, think like an F1 expert. What historical caveat have you not accounted for? At the same time, do not overthink and feel free to ask as many questions as you need.
 4. Do not make complex try-except exception handling unless it is absolutely necessary. If something fails in our project, we want it to fail loudly. We don't want to mop it up. After all, this database is designed to be the most comprehensive.
-
+5. StatsF1 will IP block you if you hammer the server. Please don't hammer the server and add gaps.

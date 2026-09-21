@@ -8,3 +8,7 @@ compress_db.py
 /scrapers/__pycache__/
 /updaters/__pycache__/
 sessionresults.db-journal
+regenerate_circuit_layouts.progress.json
+vlm_text_sheet.png
+wikipedia_circuit_directions.json
+/assets/tessdata/

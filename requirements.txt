@@ -6,3 +6,19 @@ timezonefinder
 deep_translator
 curl_cffi
 ollama
+pillow
+# PaddleOCR-VL runs through transformers; install torch/torchvision from the
+# PyTorch index for CUDA, e.g. --index-url https://download.pytorch.org/whl/cu126
+torch
+torchvision
+transformers>=5.0.0
+accelerate
+# The label arbiter is Tesseract: install the binary (winget install
+# UB-Mannheim.TesseractOCR) and put tessdata_best's script/Latin.traineddata
+# in assets/tessdata.
+pytesseract
+easyocr
+# docTR is the third first reader of the labels (torch backend).
+python-doctr
+# TrOCR (microsoft/trocr-large-printed) also runs through transformers; it
+# downloads on first use.
