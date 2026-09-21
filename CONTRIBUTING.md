@@ -54,6 +54,22 @@ python writedb.py          # populates it (this takes a long time)
 
 Note that `sessionresults.db` is in `.gitignore`. **Never commit the database file.** The database is distributed through Releases, not through git.
 
+### Optional: LLM and OCR setup (circuit layouts & engine models)
+
+You only need this if you work on `scrapers/circuit_layout_scraper.py` (`CircuitLayouts.SVG`, `TrackDirection`) or `scrapers/scrape_engine_models.py` (`EngineModels.StatsF1Data`). The rest of the project builds without it.
+
+1. Install [Ollama](https://ollama.com) and pull the three models the scrapers call:
+```bash
+ollama pull qwen3-vl:4b
+ollama pull openbmb/minicpm-v4.6:1b
+ollama pull llama3.1:8b
+```
+`qwen3-vl:4b` is the primary circuit-map OCR reader (retried with a repeat penalty, then `minicpm` on failure); `minicpm` also arbitrates disputed label crops; `llama3.1:8b` is the engine-model matcher's last resort after era, team-usage, and fuzzy matching.
+
+2. `pip install -r requirements.txt` already includes the OCR stack: `PaddleOCR-VL-1.6` (via `transformers`), `python-doctr`, `easyocr`, `microsoft/trocr-large-printed` (via `transformers`), `pytesseract`, plus `torch`/`torchvision` (use the PyTorch CUDA index for GPU; the pipeline parks models on CPU between maps and was tuned for ~6 GB VRAM).
+
+3. Install the Tesseract binary (e.g. `winget install UB-Mannheim.TesseractOCR`) and put tessdata_best's `script/Latin.traineddata` in `assets/tessdata/` (gitignored). The scraper checks PATH for `tesseract`, falling back to `C:\Program Files\Tesseract-OCR\tesseract.exe`.
+
 ## The workflow
 
 1. Fork the repository.
@@ -108,6 +124,8 @@ At the same time, don't overthink it. Ask as many questions as you need in the i
 
 **4. Be considerate to the sources.** The scrapers hit StatsF1, Motorsport Stats, Pitwall, Wikipedia, and others. Keep the existing rate limiting and random pauses in place. The Wikipedia REST API in particular only allows 500 requests per hour.
 
+**5. Keep the LLM/OCR pipeline deterministic and local.** If you touch `circuit_layout_scraper.py` or `scrape_engine_models.py`: keep temperatures at 0.0 and the exact model names (`qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:8b`) unless you re-validate every layout/make; keep the fail-loud behaviour (unmatched engine entries abort the make, unreadable direction stores NULL with a warning plus a `DIRECTION_OVERRIDES` pointer, disputed labels are kept with `data-review="1"` rather than silently dropped); and keep the model unload/`empty_cache` calls — removing them OOMs 6 GB cards when qwen loads after Paddle/docTR.
+
 ### Where things live
 
 | Path | What it does |
@@ -118,7 +136,7 @@ At the same time, don't overthink it. Ask as many questions as you need in the i
 | `updaters/deleterace.py` | Deletes one race, for re-scraping. |
 | `updaters/updaterace.py` | Re-syncs one race's result with StatsF1 after a post-race change, plus the standings and statistics that depend on it. |
 | `updaters/update_stats_alone.py` | Recomputes derived statistics. |
-| `scrapers/` | Standalone scrapers for specific data (engine models, historical practice sessions). |
+| `scrapers/` | Standalone scrapers for specific data: `scrape_engine_models.py` (StatsF1 engine specs + LLM matcher → `EngineModels.StatsF1Data`), `circuit_layout_scraper.py` (StatsF1 map tracing + vision/OCR label reading → `CircuitLayouts.SVG`/`TrackDirection`, needs Ollama + Tesseract, see setup above), `scrape_historical_practice.py` (2000–2003 Thursday/Friday/Saturday practice). |
 
 The delete scripts are debugging tools. They do not clear every table containing data for that season or Grand Prix, so don't treat them as a full undo.
 
@@ -154,6 +172,15 @@ If you only changed race reports:
 ```bash
 python writedb.py --updateracereport 2025
 ```
+
+If you only changed the engine-model or circuit-layout scrapers, run them standalone rather than rebuilding the whole database:
+
+```bash
+python scrapers/scrape_engine_models.py   # only rows with StatsF1Data IS NULL; needs llama3.1:8b
+python scrapers/circuit_layout_scraper.py # needs qwen3-vl:4b, minicpm, Tesseract + assets/tessdata
+```
+
+Both sleep between StatsF1 requests — leave the sleeps alone. The engine scraper aborts a make on unmatched entries instead of writing partial data; treat that error as the test failing, not as something to work around.
 
 ## Contributing without code
 
