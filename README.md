@@ -73,7 +73,8 @@ This database has every single Grand Prix part of the _World Championship_. It d
   22. [MaxSpeeds](#22-maxspeeds)
   23. [RaceControlMessages](#23-racecontrolmessages)
   24. [WeatherData](#24-weatherdata)
-  25. [FamilyRelations](#25-familyrelations)
+  25. [HistoricalWeather](#25-historicalweather)
+  26. [FamilyRelations](#26-familyrelations)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md)
@@ -1218,7 +1219,25 @@ This table contains the weather data for each race. Data is available from 2018 
 - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
 - **SessionID**: Foreign key to Sessions. _INTEGER_
 
-25. ### FamilyRelations:
+25. ### HistoricalWeather:
+This table contains backfilled weather data for races before 2018, sourced from the [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api) using each circuit's coordinates. Unlike `WeatherData`, which uses live per-session telemetry, this data is hourly, so a session may have multiple rows spanning its start and end time.
+
+**Columns:**
+
+- **GrandPrixName**: Name of the Grand Prix. _TEXT_
+- **SessionName**: Name of the session. _TEXT_
+- **TimestampUTC**: The UTC timestamp of this hourly data point. _TEXT_
+- **AirTemperatureC**: Air temperature in degrees Celsius. _REAL_
+- **SoilTemperatureC**: Soil temperature at the surface in degrees Celsius, used as a substitute for track temperature since historical track temperature is not available. _REAL_
+- **HumidityPercent**: Humidity in percentage. _REAL_
+- **AirPressureMbar**: Air pressure in millibars. _REAL_
+- **PrecipitationMm**: Precipitation in millimetres for the hour. _REAL_
+- **WindSpeedMs**: Wind speed in metres per second. _REAL_
+- **WindDirectionDegrees**: Wind direction in degrees. _REAL_
+- **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+- **SessionID**: Foreign key to Sessions. _INTEGER_
+
+26. ### FamilyRelations:
 This table contains family relationships between drivers in Formula 1 history. Each relationship is stored bidirectionally (e.g. Jacques Villeneuve is Gilles Villeneuve' son, then both "Jacques Villeneuve is Gilles Villeneuve's son" and "Gilles Villeneuve is Jacques Villeneuve's father" are stored).
 
 **Columns:**

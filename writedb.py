@@ -813,6 +813,130 @@ def save_weather_data(cursor, year, round_number, grandprix_name, grandprix_id):
 
         print(f"Weather data saved for {grandprix_name} {matched_session['name']}")
 
+
+ARCHIVE_API_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+HISTORICAL_WEATHER_HOURLY_VARS = [
+    "temperature_2m",
+    "soil_temperature_0cm",
+    "relative_humidity_2m",
+    "surface_pressure",
+    "precipitation",
+    "wind_speed_10m",
+    "wind_direction_10m",
+]
+
+
+def fetch_historical_weather(lat, lng, date_str):
+    """
+    date_str: 'YYYY-MM-DD'. start_date == end_date == the race date gives us
+    the full day at hourly resolution. windspeed_unit=ms matches the existing
+    WindSpeedMs column, so no km/h -> m/s conversion is needed downstream.
+    """
+    params = {
+        "latitude": lat,
+        "longitude": lng,
+        "start_date": date_str,
+        "end_date": date_str,
+        "hourly": ",".join(HISTORICAL_WEATHER_HOURLY_VARS),
+        "timezone": "UTC",
+        "windspeed_unit": "ms",
+    }
+    url = f"{ARCHIVE_API_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def save_historical_weather_data(cursor, year, round_number, grandprix_name, grandprix_id):
+    # WeatherData already covers 2018+ via FastF1 telemetry (see save_weather_data).
+    # This function is the pre-2018 backfill, so the two never overlap.
+    if year >= 2018:
+        return
+
+    cursor.execute("""
+        SELECT cl.Latitude, cl.Longitude
+        FROM GrandsPrix gp
+        JOIN CircuitLayouts cl ON gp.CircuitLayoutID = cl.ID
+        WHERE gp.ID = ?
+    """, (grandprix_id,))
+    coords_row = cursor.fetchone()
+    if not coords_row or coords_row[0] is None or coords_row[1] is None:
+        print(f"No circuit coordinates found for {grandprix_name}, skipping historical weather")
+        return
+    lat, lng = coords_row
+
+    cursor.execute("""
+        SELECT ID, SessionName, StartTimeTimestampUTC, EndTimeTimestampUTC
+        FROM Sessions
+        WHERE GrandPrixID = ?
+    """, (grandprix_id,))
+    sessions = cursor.fetchall()
+    if not sessions:
+        return
+
+    # Cache one day's hourly data per date so multiple sessions on the same
+    # date (e.g. qualifying + race) only cost one API call.
+    day_cache = {}
+
+    for session_id, session_name, start_ts_utc, end_ts_utc in sessions:
+        if start_ts_utc is None:
+            # TODO: sessions with only a date and no start/end time (older
+            # races). Needs a decision on the fallback window rather than
+            # guessing one here.
+            continue
+
+        session_start = datetime.datetime.fromtimestamp(start_ts_utc, tz=datetime.timezone.utc).replace(tzinfo=None)
+        session_end = (
+            datetime.datetime.fromtimestamp(end_ts_utc, tz=datetime.timezone.utc).replace(tzinfo=None) if end_ts_utc else session_start + datetime.timedelta(hours=2)
+        )
+        date_str = session_start.strftime("%Y-%m-%d")
+
+        if date_str not in day_cache:
+            try:
+                day_cache[date_str] = fetch_historical_weather(lat, lng, date_str)
+            except Exception as exc:
+                print(f"Open-Meteo archive lookup failed for {grandprix_name} on {date_str}: {exc}")
+                day_cache[date_str] = None
+
+        data = day_cache[date_str]
+        if data is None or "hourly" not in data:
+            continue
+
+        hourly = data["hourly"]
+        times = hourly.get("time", [])
+
+        for i, time_str in enumerate(times):
+            hour_dt = datetime.datetime.fromisoformat(time_str)
+            if not (session_start <= hour_dt <= session_end):
+                continue
+
+            cursor.execute("""
+                INSERT INTO HistoricalWeather (
+                    GrandPrixName, SessionName, TimestampUTC,
+                    AirTemperatureC, SoilTemperatureC, HumidityPercent,
+                    AirPressureMbar, PrecipitationMm, WindSpeedMs,
+                    WindDirectionDegrees, GrandPrixID, SessionID
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                grandprix_name,
+                session_name,
+                time_str,
+                hourly.get("temperature_2m", [None] * len(times))[i],
+                hourly.get("soil_temperature_0cm", [None] * len(times))[i],
+                hourly.get("relative_humidity_2m", [None] * len(times))[i],
+                hourly.get("surface_pressure", [None] * len(times))[i],
+                hourly.get("precipitation", [None] * len(times))[i],
+                hourly.get("wind_speed_10m", [None] * len(times))[i],
+                hourly.get("wind_direction_10m", [None] * len(times))[i],
+                grandprix_id,
+                session_id,
+            ))
+
+        print(f"Historical weather saved for {grandprix_name} {session_name}")
+
+
 #This function gets the birthdate and nationality of a driver from their statsf1.com page. 
 def fetch_driver_info(driver_name):
     # Convert "George Russell" → "george-russell"
@@ -4982,6 +5106,7 @@ for season in seasons[index:]:
         ensure_combined_qualifying_session(cur, gp, race_info['race_number'], year)
         save_race_control_messages(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         save_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
+        save_historical_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         if race_info['race_number'] > 344: #only after 1981 argentine grand prix
             grandprixlinks.append({'href': f"https://motorsportstats.com/api/results-classification?sessionSlug=fia-formula-one-world-championship_{year}_{msgrandprix}_race"})
 

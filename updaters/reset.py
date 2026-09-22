@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather"
 ]
 
 for table in tables:
@@ -840,6 +840,23 @@ cursor.execute('''CREATE TABLE WeatherData (
     TrackTemperatureC REAL,
     WindDirectionDegrees REAL,
     WindSpeedMs REAL,
+    GrandPrixID INTEGER,
+    SessionID INTEGER,
+    FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID)
+)''')
+
+cursor.execute('''CREATE TABLE HistoricalWeather (
+    GrandPrixName TEXT,
+    SessionName TEXT,
+    TimestampUTC TEXT,
+    AirTemperatureC REAL,
+    SoilTemperatureC REAL,
+    HumidityPercent REAL,
+    AirPressureMbar REAL,
+    PrecipitationMm REAL,
+    WindSpeedMs REAL,
+    WindDirectionDegrees REAL,
     GrandPrixID INTEGER,
     SessionID INTEGER,
     FOREIGN KEY (SessionID) REFERENCES Sessions(ID),
