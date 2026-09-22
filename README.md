@@ -1220,7 +1220,7 @@ This table contains the weather data for each race. Data is available from 2018 
 - **SessionID**: Foreign key to Sessions. _INTEGER_
 
 25. ### HistoricalWeather:
-This table contains backfilled weather data for races before 2018, sourced from the [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api) using each circuit's coordinates. Unlike `WeatherData`, which uses live per-session telemetry, this data is hourly, so a session may have multiple rows spanning its start and end time.
+This table contains weather data for all races, sourced from the [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api) using each circuit's coordinates. Unlike `WeatherData`, which uses live per-session telemetry (2018+ only) and stores rainfall as a boolean, this data is hourly and gives quantitative precipitation, so a session may have multiple rows spanning its start and end time, and the two tables intentionally overlap in years covered.
 
 **Columns:**
 

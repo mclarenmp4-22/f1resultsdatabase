@@ -849,10 +849,11 @@ def fetch_historical_weather(lat, lng, date_str):
 
 
 def save_historical_weather_data(cursor, year, round_number, grandprix_name, grandprix_id):
-    # WeatherData already covers 2018+ via FastF1 telemetry (see save_weather_data).
-    # This function is the pre-2018 backfill, so the two never overlap.
-    if year >= 2018:
-        return
+    # Runs for all years, not just pre-2018. WeatherData (FastF1 telemetry,
+    # 2018+) stores rainfall as a boolean at session resolution; this table
+    # exists to give quantitative precipitation (and hourly resolution) on
+    # top of that, so the two intentionally overlap in years covered rather
+    # than splitting by era.
 
     cursor.execute("""
         SELECT cl.Latitude, cl.Longitude
@@ -881,9 +882,9 @@ def save_historical_weather_data(cursor, year, round_number, grandprix_name, gra
 
     for session_id, session_name, start_ts_utc, end_ts_utc in sessions:
         if start_ts_utc is None:
-            # TODO: sessions with only a date and no start/end time (older
-            # races). Needs a decision on the fallback window rather than
-            # guessing one here.
+            # Skipped: sessions with only a date and no start/end time.
+            # Per maintainer, this is contingent on issue #10 (Sessions
+            # table upgrade) -- revisit once that lands.
             continue
 
         session_start = datetime.datetime.fromtimestamp(start_ts_utc, tz=datetime.timezone.utc).replace(tzinfo=None)
