@@ -12,3 +12,4 @@ regenerate_circuit_layouts.progress.json
 vlm_text_sheet.png
 wikipedia_circuit_directions.json
 /assets/tessdata/
+tests/

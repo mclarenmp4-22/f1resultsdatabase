@@ -58,13 +58,31 @@ Note that `sessionresults.db` is in `.gitignore`. **Never commit the database fi
 
 You only need this if you work on `scrapers/circuit_layout_scraper.py` (`CircuitLayouts.SVG`, `TrackDirection`) or `scrapers/scrape_engine_models.py` (`EngineModels.StatsF1Data`). The rest of the project builds without it.
 
-1. Install [Ollama](https://ollama.com) and pull the three models the scrapers call:
+1. Set the shared `F1_AI_TIER` environment variable to `none` (default), `low`, `medium`, or `high`. The `none` tier keeps engine matching deterministic and runs circuit label recognition through CPU Tesseract. The other tiers require [Ollama](https://ollama.com) and their selected models:
+
+| Tier | Required Ollama models |
+|---|---|
+| `low` | `qwen3-vl:2b` |
+| `medium` | `qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:8b` |
+| `high` | `qwen3-vl:8b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:70b` |
+
+Pull the Ollama models listed for the tier you plan to use. For example, the full set can be installed with:
 ```bash
+ollama pull qwen3-vl:2b
 ollama pull qwen3-vl:4b
+ollama pull qwen3-vl:8b
 ollama pull openbmb/minicpm-v4.6:1b
 ollama pull llama3.1:8b
+ollama pull llama3.1:70b
 ```
-`qwen3-vl:4b` is the primary circuit-map OCR reader (retried with a repeat penalty, then `minicpm` on failure); `minicpm` also arbitrates disputed label crops; `llama3.1:8b` is the engine-model matcher's last resort after era, team-usage, and fuzzy matching.
+
+Set Medium for the current PowerShell session with:
+
+```powershell
+$env:F1_AI_TIER = "medium"
+```
+
+The circuit scraper needs Tesseract and Latin tessdata at every tier. Its larger OCR stack (PaddleOCR-VL, docTR, EasyOCR, and TrOCR) is used at Medium and High. Existing circuit layout versions are not regenerated during normal scraping; only usage dates change unless a new version appears.
 
 2. `pip install -r requirements.txt` already includes the OCR stack: `PaddleOCR-VL-1.6` (via `transformers`), `python-doctr`, `easyocr`, `microsoft/trocr-large-printed` (via `transformers`), `pytesseract`, plus `torch`/`torchvision` (use the PyTorch CUDA index for GPU; the pipeline parks models on CPU between maps and was tuned for ~6 GB VRAM).
 
@@ -124,7 +142,7 @@ At the same time, don't overthink it. Ask as many questions as you need in the i
 
 **4. Be considerate to the sources.** The scrapers hit StatsF1, Motorsport Stats, Pitwall, Wikipedia, and others. Keep the existing rate limiting and random pauses in place. The Wikipedia REST API in particular only allows 500 requests per hour.
 
-**5. Keep the LLM/OCR pipeline deterministic and local.** If you touch `circuit_layout_scraper.py` or `scrape_engine_models.py`: keep temperatures at 0.0 and the exact model names (`qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:8b`) unless you re-validate every layout/make; keep the fail-loud behaviour (unmatched engine entries abort the make, unreadable direction stores NULL with a warning plus a `DIRECTION_OVERRIDES` pointer, disputed labels are kept with `data-review="1"` rather than silently dropped); and keep the model unload/`empty_cache` calls — removing them OOMs 6 GB cards when qwen loads after Paddle/docTR.
+**5. Keep the LLM/OCR pipeline deterministic and local.** Both scrapers follow `F1_AI_TIER` (`none` by default). Keep temperatures at 0.0 and the per-tier model mapping in `scrapers/ai_tiers.py`; keep the fail-loud behaviour (unmatched engine entries abort the make, unreadable direction stores NULL with a warning plus a `DIRECTION_OVERRIDES` pointer, disputed labels are kept with `data-review="1"` rather than silently dropped); and keep the model unload/`empty_cache` calls for the multi-reader tiers.
 
 ### Where things live
 
@@ -136,7 +154,7 @@ At the same time, don't overthink it. Ask as many questions as you need in the i
 | `updaters/deleterace.py` | Deletes one race, for re-scraping. |
 | `updaters/updaterace.py` | Re-syncs one race's result with StatsF1 after a post-race change, plus the standings and statistics that depend on it. |
 | `updaters/update_stats_alone.py` | Recomputes derived statistics. |
-| `scrapers/` | Standalone scrapers for specific data: `scrape_engine_models.py` (StatsF1 engine specs + LLM matcher → `EngineModels.StatsF1Data`), `circuit_layout_scraper.py` (StatsF1 map tracing + vision/OCR label reading → `CircuitLayouts.SVG`/`TrackDirection`, needs Ollama + Tesseract, see setup above), `scrape_historical_practice.py` (2000–2003 Thursday/Friday/Saturday practice). |
+| `scrapers/` | Standalone scrapers for specific data: `scrape_engine_models.py` (StatsF1 engine specs + tiered matcher → `EngineModels.StatsF1Data`), `circuit_layout_scraper.py` (StatsF1 map tracing + tiered OCR → `CircuitLayouts.SVG`/`TrackDirection`, needs Tesseract; Ollama is used at AI tiers, see setup above), `scrape_historical_practice.py` (2000–2003 Thursday/Friday/Saturday practice). |
 
 The delete scripts are debugging tools. They do not clear every table containing data for that season or Grand Prix, so don't treat them as a full undo.
 
@@ -176,8 +194,8 @@ python writedb.py --updateracereport 2025
 If you only changed the engine-model or circuit-layout scrapers, run them standalone rather than rebuilding the whole database:
 
 ```bash
-python scrapers/scrape_engine_models.py   # only rows with StatsF1Data IS NULL; needs llama3.1:8b
-python scrapers/circuit_layout_scraper.py # needs qwen3-vl:4b, minicpm, Tesseract + assets/tessdata
+python scrapers/scrape_engine_models.py   # only rows with StatsF1Data IS NULL; AI model depends on F1_AI_TIER
+python scrapers/circuit_layout_scraper.py # Tesseract + assets/tessdata; Ollama/OCR models depend on F1_AI_TIER
 ```
 
 Both sleep between StatsF1 requests — leave the sleeps alone. The engine scraper aborts a make on unmatched entries instead of writing partial data; treat that error as the test failing, not as something to work around.

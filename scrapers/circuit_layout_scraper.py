@@ -3,7 +3,6 @@ import re
 import math
 import cv2
 import numpy as np
-from ollama import chat
 import json
 import os
 import shutil
@@ -54,6 +53,39 @@ import html
 import unicodedata
 from pathlib import Path
 from PIL import Image
+
+if __package__:
+    from scrapers.ai_tiers import (
+        CIRCUIT_ARBITER_MODELS,
+        CIRCUIT_PRIMARY_MODELS,
+        require_ollama_models,
+        resolve_ai_tier,
+    )
+else:
+    from ai_tiers import (
+        CIRCUIT_ARBITER_MODELS,
+        CIRCUIT_PRIMARY_MODELS,
+        require_ollama_models,
+        resolve_ai_tier,
+    )
+
+
+AI_TIER = resolve_ai_tier()
+
+
+def ollama_chat(**kwargs):
+    """Import the Ollama client only on a tier that uses a local model."""
+    from ollama import chat
+    return chat(**kwargs)
+
+
+def ensure_circuit_models():
+    if AI_TIER == "none":
+        return
+    models = [CIRCUIT_PRIMARY_MODELS[AI_TIER]]
+    if AI_TIER in CIRCUIT_ARBITER_MODELS:
+        models.append(CIRCUIT_ARBITER_MODELS[AI_TIER])
+    require_ollama_models(*models)
 
 
 def gimp_contrast(pil_gray, contrast=1.0, pivot=200):
@@ -1004,10 +1036,15 @@ def find_text_lines(white_mask, exclude_boxes=()):
 # map by a VLM.
 #
 # The map is preprocessed first (see preprocess_for_ocr) so none of the aerial
-# photo underneath survives into what the model sees. qwen3-vl:4b reads it; if
-# that fails it is retried with a repeat penalty, and if that fails too
-# minicpm, which is less accurate but copes with far more context, gets it.
-OCR_MODELS = ("qwen3-vl:4b", "openbmb/minicpm-v4.6:1b")
+# photo underneath survives into what the model sees. The selected tier's
+# Qwen3-VL model reads it; medium/high retry with a repeat penalty and then use
+# MiniCPM if needed. Low has no larger-model fallback.
+OCR_MODELS = tuple(
+    ([CIRCUIT_PRIMARY_MODELS[AI_TIER]] if AI_TIER in CIRCUIT_PRIMARY_MODELS else [])
+    + ([CIRCUIT_ARBITER_MODELS[AI_TIER]] if AI_TIER in CIRCUIT_ARBITER_MODELS else [])
+)
+QWEN_MODEL = CIRCUIT_PRIMARY_MODELS.get(AI_TIER)
+ARBITER_MODEL = CIRCUIT_ARBITER_MODELS.get(AI_TIER)
 OCR_INPUT_PATH = "vlm_inference_ready.png"
 
 SYSTEM_PROMPT_OCR = """
@@ -1097,8 +1134,8 @@ def ocr_labels(bgr):
     temp_vlm_input = OCR_INPUT_PATH
     preprocess_for_ocr(bgr).save(temp_vlm_input)
     try:
-        response_p1 = chat(
-            model='qwen3-vl:4b',
+        response_p1 = ollama_chat(
+            model=QWEN_MODEL,
             messages=[{
                 'role': 'user',
                 'content': SYSTEM_PROMPT_OCR,
@@ -1115,14 +1152,14 @@ def ocr_labels(bgr):
         )
 
         labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content')) #for some reason, the response comes in the thinking field for me.
-        chat(model="qwen3-vl:4b", messages=[], keep_alive=0)
+        ollama_chat(model=QWEN_MODEL, messages=[], keep_alive=0)
     except Exception as e:
-        chat(model="qwen3-vl:4b", messages=[], keep_alive=0) #unload the model to free up memory
+        ollama_chat(model=QWEN_MODEL, messages=[], keep_alive=0) #unload the model to free up memory
         print("Primary OCR failed: %s", e)
         try:
             #try qwen with a repeat penalty
-            response_p1 = chat(
-                model='qwen3-vl:4b',
+            response_p1 = ollama_chat(
+                model=QWEN_MODEL,
                 messages=[{
                     'role': 'user',
                     'content': SYSTEM_PROMPT_OCR,
@@ -1141,13 +1178,15 @@ def ocr_labels(bgr):
             )
 
             labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))
-            chat(model="qwen3-vl:4b", messages=[], keep_alive=0)
+            ollama_chat(model=QWEN_MODEL, messages=[], keep_alive=0)
         except Exception as e2:
             #try a smaller model if qwen fails, because qwen is very large and can run out of memory if there is too much context. the smaller model is less accurate, but it can handle more context.
-            chat(model="qwen3-vl:4b", messages=[], keep_alive=0) #unload the model to free up memory
+            ollama_chat(model=QWEN_MODEL, messages=[], keep_alive=0) #unload the model to free up memory
+            if AI_TIER == "low":
+                raise RuntimeError("The selected Low tier circuit OCR model failed after retry.") from e2
             print("Secondary OCR failed: %s", e2)
-            response_p1 = chat(
-                model='openbmb/minicpm-v4.6:1b',
+            response_p1 = ollama_chat(
+                model=ARBITER_MODEL,
                 messages=[{
                     'role': 'user',
                     'content': SYSTEM_PROMPT_OCR_FALLBACK,
@@ -1166,7 +1205,7 @@ def ocr_labels(bgr):
                 }
             )
             labels = json.loads(response_p1['message'].get('thinking') or response_p1['message'].get('content'))
-            chat(model="openbmb/minicpm-v4.6:1b", messages=[], keep_alive=0) #unload the model to free up memory
+            ollama_chat(model=ARBITER_MODEL, messages=[], keep_alive=0) #unload the model to free up memory
     finally:
         if os.path.exists(temp_vlm_input):
             os.remove(temp_vlm_input)
@@ -1228,7 +1267,6 @@ SOURCE_NAMES = {"paddle": "Paddle", "doctr": "docTR", "qwen": "qwen"}
 # CPU: the crops are tiny, and leaving its torch model on the GPU would fight
 # qwen/Paddle/Ollama for VRAM, and so is TrOCR. TrOCR is the large printed
 # model: accuracy matters more here than the second or so per crop it costs.
-ARBITER_MODEL = "openbmb/minicpm-v4.6:1b"
 TROCR_MODEL = "microsoft/trocr-large-printed"
 TROCR_MAX_NEW_TOKENS = 32
 # A run of inked rows under this share of the tallest one is an accent or a
@@ -1602,7 +1640,7 @@ def minicpm_reading(canvas):
     """What minicpm reads in the crop: "" for no text, None if it failed."""
     canvas.save(ARBITER_CROP_PATH)
     try:
-        response = chat(
+        response = ollama_chat(
             model=ARBITER_MODEL,
             messages=[{"role": "user",
                        "content": ("The image shows white text on a black background, cut from a Formula One "
@@ -1623,7 +1661,7 @@ def minicpm_reading(canvas):
             os.remove(ARBITER_CROP_PATH)
 
 
-def tesseract_reading(canvas, digits=False):
+def tesseract_reading(canvas, digits=False, fail_loud=False):
     """(text, confidence) from Tesseract for the crop: ("", 0) for no text, (None, 0) if it failed.
 
     `digits` reads the crop as a turn number: one word, digits only.
@@ -1641,6 +1679,8 @@ def tesseract_reading(canvas, digits=False):
         data = pytesseract.image_to_data(canvas, lang=TESSERACT_LANG, config=config,
                                          output_type=pytesseract.Output.DICT)
     except (pytesseract.TesseractError, pytesseract.TesseractNotFoundError, OSError) as e:
+        if fail_loud:
+            raise RuntimeError("Tesseract failed while reading a circuit map label.") from e
         print(f"  Tesseract could not read a crop: {e}")
         return None, 0.0
     lines = {}
@@ -1968,7 +2008,32 @@ def pixels_under(mask, box):
     return int(np.count_nonzero(mask[y1:y2, x1:x2]))
 
 
-def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
+def tesseract_map_labels(pid, text_boxes, white_mask):
+    """Read detected label regions with CPU Tesseract and retain uncertain reads for review."""
+    if white_mask is None:
+        return []
+    results = []
+    height, width = white_mask.shape
+    for x, y, box_width, box_height in text_boxes or []:
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(width, x + box_width), min(height, y + box_height)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        canvas = Image.fromarray(white_mask[y1:y2, x1:x2])
+        text, confidence = tesseract_reading(canvas, fail_loud=True)
+        if not text:
+            continue
+        results.append({
+            "text": text,
+            "box": (x1, y1, x2, y2),
+            "review": confidence < ARBITER_MIN_CONFIDENCE,
+            "alt": "",
+        })
+    print(f"  {pid}: {len(results)} labels read by Tesseract at AI tier {AI_TIER}.")
+    return results
+
+
+def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None, text_boxes=None):
     """[{"text", "box", "review", "alt"}] for one map, cross-checked as described above.
 
     `glyph_mask` is find_text_lines' glyph mask for the map, which qwen's
@@ -1976,12 +2041,19 @@ def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
     from, which Paddle's and docTR's are. Without them no label is checked
     against the pixels.
     """
-    readers = {"paddle": paddle_labels, "doctr": doctr_labels, "qwen": qwen_labels}
+    if AI_TIER == "none":
+        return tesseract_map_labels(pid, text_boxes, white_mask)
+
+    readers = {"qwen": qwen_labels} if AI_TIER == "low" else {
+        "paddle": paddle_labels, "doctr": doctr_labels, "qwen": qwen_labels
+    }
     found = {}
     for source, read in readers.items():
         try:
             found[source] = read(bgr)
         except Exception as e:
+            if AI_TIER == "low" and source == "qwen":
+                raise RuntimeError(f"The selected Low tier circuit OCR model failed for {pid}.") from e
             print(f"  WARNING: {pid}: {SOURCE_NAMES[source]} failed ({e}); the other readers go unchecked by it.")
             found[source] = []
 
@@ -2035,11 +2107,15 @@ def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
             counts["dropped"] += 1
             continue
         digits = all(t.isdigit() for t in candidates)
-        readings = [("Tesseract", *tesseract_reading(canvas, digits=digits)),
-                    ("EasyOCR", *easyocr_reading(canvas, digits=digits)),
-                    ("TrOCR", *trocr_reading(canvas, digits=digits))]
-        minicpm = minicpm_reading(canvas)
-        minicpm_used = True
+        readings = [("Tesseract", *tesseract_reading(canvas, digits=digits))]
+        minicpm = None
+        if AI_TIER in {"medium", "high"}:
+            readings.extend([
+                ("EasyOCR", *easyocr_reading(canvas, digits=digits)),
+                ("TrOCR", *trocr_reading(canvas, digits=digits)),
+            ])
+            minicpm = minicpm_reading(canvas)
+            minicpm_used = True
 
         if len(majority) >= 2:
             # Two first readers agree and the third reads something else. The
@@ -2081,7 +2157,7 @@ def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
         results.append({"text": text, "box": box, "review": review, "alt": " / ".join(alts)})
 
     if minicpm_used:
-        chat(model=ARBITER_MODEL, messages=[], keep_alive=0)
+        ollama_chat(model=ARBITER_MODEL, messages=[], keep_alive=0)
     print(f"  {pid}: {len(results)} labels - {counts['agreed']} agreed, {counts['majority']} taken two readers "
           f"to one ({counts['overturned']} overturned for review), {counts['settled']} settled by the arbiters, "
           f"{counts['confirmed']} single readings confirmed, {counts['review']} for review, "
@@ -2093,7 +2169,7 @@ def read_map_labels(bgr, pid, glyph_mask=None, white_mask=None):
 def unload_ocr_models():
     global _paddle, _easyocr, _trocr, _doctr
     for model in OCR_MODELS:
-        chat(model=model, messages=[], keep_alive=0)
+        ollama_chat(model=model, messages=[], keep_alive=0)
     if _paddle is not None:
         _paddle = None
         import torch
@@ -2327,6 +2403,8 @@ def generate_track_svg(image_path, grand_prix_dates=None, image_bytes=None):
         # too far from every other map's shape for the tracer; hand-drawn.
         return AVUS_SVG, "Anticlockwise"
 
+    ensure_circuit_models()
+
     if image_bytes is None:
         img, _ = imread_from_url(image_path)
     else:
@@ -2374,7 +2452,7 @@ def generate_track_svg(image_path, grand_prix_dates=None, image_bytes=None):
     white_with_text = white.copy()
     for x, y, bw, bh in text_boxes:
         erase_components_in_box(white, (x, y, x + bw, y + bh), margin=2)
-    labels = read_map_labels(img, pid, glyph_mask, white_with_text)
+    labels = read_map_labels(img, pid, glyph_mask, white_with_text, text_boxes)
 
     # 4. Geometry off the cleaned mask.
     band = track_band(white)
@@ -2512,6 +2590,46 @@ def clean_circuittype_bullet(li):
     ).strip()
 
 
+def save_circuit_layout_version(
+    cur,
+    latitude,
+    longitude,
+    elevation,
+    country,
+    dates,
+    version,
+    image_path,
+    circuit_changes,
+    official_circuit_name=None,
+    track_type=None,
+):
+    """Update dates for a known version or generate and insert a new layout."""
+    cur.execute(
+        "SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?",
+        (latitude, longitude, version),
+    )
+    existing = cur.fetchone()
+    dates_json = json.dumps(dates)
+    if existing:
+        layout_id = existing[0]
+        cur.execute(
+            "UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE ID = ?",
+            (dates_json, layout_id),
+        )
+        return layout_id, False
+
+    svg, track_direction = generate_track_svg(image_path, dates)
+    cur.execute(
+        "INSERT INTO CircuitLayouts "
+        "(Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, "
+        "TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (latitude, longitude, elevation, country, dates_json, version, track_direction,
+         svg, circuit_changes, official_circuit_name, track_type),
+    )
+    return cur.lastrowid, True
+
+
 def parse_circuit_metadata(soup, fallback_name=None):
     """(official circuit name, track type) off a statsf1 circuit page.
 
@@ -2609,6 +2727,12 @@ if __name__ == "__main__":
         lat = parse_coordinate(lat)
         lng = parse_coordinate(lng)
         official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=v.get_text(strip=True))
+        cur.execute(
+            "SELECT Elevation, Country FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? LIMIT 1",
+            (lat, lng),
+        )
+        existing_circuit = cur.fetchone()
+        elevation, country = existing_circuit if existing_circuit else (None, None)
         circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
         for layoutdiv in circuitlayoutdivs:
             circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
@@ -2617,6 +2741,9 @@ if __name__ == "__main__":
             layoutimg = layoutdiv.find('img')['src']
             circuit_text_div = layoutdiv.find('div', class_='circuitversiontxt')
             circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')            
-            t, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
-            cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ?, CircuitVersion = ?, SVG = ?, CircuitChanges = ?, TrackDirection = ?, OfficialCircuitName = ?, TrackType = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (json.dumps(dates), version, t, circuit_text, track_direction, official_circuit_name, track_type, lat, lng, version))
+            save_circuit_layout_version(
+                cur, lat, lng, elevation, country, dates, version,
+                f'https://www.statsf1.com{layoutimg}', circuit_text,
+                official_circuit_name, track_type,
+            )
             conn.commit()

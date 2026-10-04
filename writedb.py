@@ -19,10 +19,12 @@ from zoneinfo import ZoneInfo
 import fastf1
 from deep_translator import GoogleTranslator
 import random # for random pauses to avoid hitting rate limits
-from ollama import chat
 import datetime
 import sqlite3
-from scrapers.circuit_layout_scraper import generate_track_svg, parse_circuit_metadata
+from scrapers.circuit_layout_scraper import (
+    parse_circuit_metadata,
+    save_circuit_layout_version,
+)
 
 # 1. Convert Python date/time objects to ISO strings when saving to SQLite
 def adapt_datetime(dt):
@@ -4736,6 +4738,7 @@ months = {
 #Also, check if there are are no circuit layouts in the CircuitLayouts table. 
 # If there are, then we can skip the circuit scraping and just do the mapping of grand prix to circuit layout id. 
 # If there are no circuit layouts, then we need to do the full scrape of circuits and circuit layouts.
+resetrun = False
 cur.execute("SELECT COUNT(*) FROM CircuitLayouts")
 if cur.fetchone()[0] == 0:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
@@ -4765,10 +4768,11 @@ if cur.fetchone()[0] == 0:
                 layoutimg = layoutdiv.find('img')['src']
                 circuit_text_div = layoutdiv.find('div', class_='circuitversiontxt')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')            
-                svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, SVG, TrackDirection, CircuitChanges)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, svg, track_direction, circuit_text))
-                cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
-                circuitlayoutid = cur.fetchone()[0]
+                circuitlayoutid, _ = save_circuit_layout_version(
+                    cur, lat, lng, elevation, country, dates, version,
+                    f'https://www.statsf1.com{layoutimg}', circuit_text,
+                )
+                resetrun = True
 else:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
     #if there are less than 1149 grands prix in the database, this will suffice.
@@ -4934,7 +4938,7 @@ for season in seasons[index:]:
             race_info['timezone'] = get_timezone_from_coords(race_info['latitude'], race_info['longitude'])
             race_info['country'] = get_country_from_coords(race_info['latitude'], race_info['longitude'])
             #If this is being updated, not reset, and this start off from the last grand prix, then we check if there are new circuit layouts for the circuit since the last grand prix, and if there are, we add them to the database.
-            if race_info['race_number'] > last_grandprix_id > 1163: 
+            if race_info['race_number'] > last_grandprix_id > 1163 and not resetrun: 
                 #temporary solution. 1149 is the 2025 Abu Dhabi Grand Prix, which is the last grand prix in the database currently, 
                 #so if the last grand prix id is greater than 1149, it means we are updating and not resetting, 
                 # and we can check for new circuit layouts since the last grand prix.
@@ -4950,24 +4954,19 @@ for season in seasons[index:]:
                 race_info['country'] = country
                 elevation = get_elevation_from_coords(lat, lng)
                 circuitlayoutdivs = soup.find_all('div', class_ = 'circuitversion')
-                cur.execute ("SELECT CircuitVersion FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ?", (race_info['latitude'], race_info['longitude']))
-                existing_versions = cur.fetchall()
-                existing_version_numbers = [int(v[0]) for v in existing_versions]
-                print(f"Processing circuit: {race_info['track_name']}, existing versions: {existing_version_numbers}")
+                print(f"Processing circuit: {race_info['track_name']} and checking for new layout versions.")
                 for layoutdiv in circuitlayoutdivs:
                     circuittable = layoutdiv.find('table', class_ = 'sortable circuittable').find_all('tr')
                     dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                     version = circuitlayoutdivs.index(layoutdiv) + 1
                     layoutimg = layoutdiv.find('img')['src']
-                    svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                     circuit_text_div = soup.find('div', class_='circuittext')
                     circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                     
-                    if version not in existing_version_numbers:               
-                        cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, track_direction, svg, circuit_text, official_circuit_name, track_type))
-                    else:
-                        cur.execute("UPDATE CircuitLayouts SET GrandPrixDates = ? WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ? AND SVG = ? AND CircuitChanges = ? AND OfficialCircuitName = ? AND TrackType = ?", (json.dumps(dates), race_info['latitude'], race_info['longitude'], version, svg, circuit_text, official_circuit_name, track_type))
-                    cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version)) 
-                    circuitlayoutid = cur.fetchone()[0]                        
+                    circuitlayoutid, _ = save_circuit_layout_version(
+                        cur, lat, lng, elevation, country, dates, version,
+                        f'https://www.statsf1.com{layoutimg}', circuit_text,
+                        official_circuit_name, track_type,
+                    )
         else:
             open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")
             official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=race_info['track_name'])
@@ -4990,12 +4989,13 @@ for season in seasons[index:]:
                 dates = [tr.find_all('td')[0]['sorttable_customkey'] for tr in circuittable[1:-1]]
                 version = circuitlayoutdivs.index(layoutdiv) + 1
                 layoutimg = layoutdiv.find('img')['src']
-                svg, track_direction = generate_track_svg(f'https://www.statsf1.com{layoutimg}', dates)
                 circuit_text_div = soup.find('div', class_='circuittext')
                 circuit_text = circuit_text_div.get_text(strip=True).replace('\n', '').replace('"', '').replace('\r', '')                
-                cur.execute("INSERT INTO CircuitLayouts (Latitude, Longitude, Elevation, Country, GrandPrixDates, CircuitVersion, TrackDirection, SVG, CircuitChanges, OfficialCircuitName, TrackType)  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (lat, lng, elevation, country, json.dumps(dates), version, track_direction, svg, circuit_text, official_circuit_name, track_type))
-                cur.execute("SELECT ID FROM CircuitLayouts WHERE Latitude = ? AND Longitude = ? AND CircuitVersion = ?", (lat, lng, version))   
-                circuitlayoutid = cur.fetchone()[0]      
+                circuitlayoutid, _ = save_circuit_layout_version(
+                    cur, lat, lng, elevation, country, dates, version,
+                    f'https://www.statsf1.com{layoutimg}', circuit_text,
+                    official_circuit_name, track_type,
+                )
         #print(race_info)
         print ("Race Info Parsed")
         #print("Race Info:", race_info)        

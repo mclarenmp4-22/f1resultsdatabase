@@ -35,30 +35,35 @@ We are so glad that you would like to contribute! We would love to have you as a
 Please check the [issues section](https://github.com/mclarenmp4-22/f1resultsdatabase/issues) for any open issues, check the ones labelled "good first issue", for issues that even beginners to this project can work on. If you have any questions, please open an issue and we will get back to you as soon as possible.
 
 ## Short term goals:
-1. We want to add telemetry data to the database. This should include throttle position, brake state, DRS state, speed, gear, and all other publicly available data. We may also want to add mini-sectors if it is found viable. This will be added from the FastF1 package mostly and the mini-sectors can be added from the OpenF1 API. 
+1. We would like to upgrade the Sessions table, such that it includes all sessions that we go through, such as warm-up sessions and pre-qualifying sessions. Further, this would also include the session name, session type, and session length, and session time. (Session times from 1961 to 1984 for qualifying and practice sessions can be found here: https://www.formula1db.com/races/ and old race times can be found here: https://www.chicanef1.com/) 
+2. formula1db.com has Q1 and Q2 data, Q3 in Monaco, in the early qualifying format that lasted till 1995. We want to add this to the database. This is for seasons not there in the database currently. However, they have the Cloudflare Turnstile enabled, so we need to get around it.
+3. We want to add telemetry data to the database. This should include throttle position, brake state, DRS state, speed, gear, and all other publicly available data. We may also want to add mini-sectors if it is found viable. This will be added from the FastF1 package mostly and the mini-sectors can be added from the OpenF1 API. 
 
-We might want to add the telemetry data in a Parquet file to save space. We want the highest telemetry frequency available to the public to be added to the database.
+We might want to add the telemetry data in a Parquet with ZSTD compression file to save space. We want the highest telemetry frequency available to the public to be added to the database.
 
-2. We will also need the circuit info from FastF1 such as marshalling light positions, corner rotation, and corner positions to be added to the database
+4. We will also need the circuit info from FastF1 such as marshalling light positions, corner rotation, and corner positions to be added to the database
 
-3. We want to add historical weather data to the database. Grands Prix depend a lot on the weather, and FastF1 also unfortunately does not have the exact precipitation, it just has a boolean on whether it rains or not. We will want granular weather data accurate to a very small precision and regularly updated wherever available. For older races, we might have to settle for lower accuracy and/or less regular updates.
-However, for newer races, we want to have the most accurate data possible. We might want soil temperature as a substitute for track temperature. We can have air temperature and pressure, humidity, precipitation, and other important weather data.
 
 ## Medium-term goals:
 1. From the OpenF1 API, we want to add mini-sector data, and the overtakes data. As the OpenF1 API has data from 2023 onwards, we want to ingest data from 2018 onwards and use that data to update the database.
 2. We want to add the team radio mp3 recordings from the OpenF1 API to the database, again from 2018 if possible.
 3. We want to add the sporting, technical, financial, and general regulation PDFs for as many seasons as possible.
 4. We want to scrape FIA's decision documents to get information. This needs to be able to handle various different types of documents, and also save images or, the bounding boxes for the image regions in the database.
-5. We would like to upgrade the Sessions table, such that it includes all sessions that we go through, such as warm-up sessions and pre-qualifying sessions. Further, this would also include the session name, session type, and session length, and session time.
-6. We would like to use agentic scraping to scrapee multiple websites for race reports and other sessions as well. Every single detail should be there in the race report.
-7. It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. We might go about that by using the archive.org wayback machine.
-8. Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/)
-9. Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions.
-10. Parse the schedule of past and present seasons and add them to the database. (If possible, check versions of the schedule as well.)
+5. We would like to use agentic scraping to scrapee multiple websites for race reports and other sessions as well. Every single detail should be there in the race report.
+6. It seems like the F1.com website in the past had additional info like best sector times, speed trap data (for seasons we don't have), and so on. We would like to add that to the database. We might go about that by using the archive.org wayback machine.
+7. Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/) If possible, get live timing data from the 1990s too.
+8. Parse the schedule of past and present seasons and add them to the database. (If possible, check versions of the schedule as well.)
+9. Get tyre history from here: https://www.motorsport.com/f1/results/2016/australian-gp-53288/?st=TH
+10. We want to add historical weather data to the database. Grands Prix depend a lot on the weather, and FastF1 also unfortunately does not have the exact precipitation, it just has a boolean on whether it rains or not. We will want granular weather data accurate to a very small precision and regularly updated wherever available. For older races, we might have to settle for lower accuracy and/or less regular updates.
+However, for newer races, we want to have the most accurate data possible. We might want soil temperature as a substitute for track temperature. We can have air temperature and pressure, humidity, precipitation, and other important weather data.
+*This goal has been partly fulfilled, but we still only have hourly data from Open-Meteo, and we would like more granular data. We could add GPM IMERG data to the database from June 2000 onwards, and MRMS 2-minute data and Europe's OPERA, Japan's JMA, and so on.*
+10. Integrate the circuit layout info from StatsF1 with the circuit layout info in https://racingcircuits.info/ . That has important info like the pit lane, and also there are more updates to the circuit layouts like widening of corners. These are not registered as separate layouts in StatsF1, but it is a different layout in racingcircuits.info. At the same time, we cannot completely replace StatsF1's circuit layouts, as some corner names are missing in racingcircuits.info. We need to find a way to reconcile the two. For the circuit layout changes text field, we need to use an LLM to get the changes from the big paragraph of text below each circuit's page. 
 
 ## Long-term goals:
 1. Migrate the lap by lap and sector and tyre info from Pitwall and TracingInsights to Jolpica and FastF1. This requires a huge refactoring of writedb.py. Pitwall can be a fallback if Jolpica is not available or rate-limited.
- 
+2. Do not make the updating of the database contingent on any single source. As we add more sources to the database, we do not want the updating of the database to fail because one source did not update their data. This would require a re-factoring of the database design. The data which is not available should be left blank and added once the data is available.
+3. Make sure this can be updated before the whole race weekend ends, that is after FP1, after FP2, and so on. It should be updatable between sessions. 
 
 ## Other features we want to implement:
+1. Get the sponsors data and lubricants data from here: https://www.chicanef1.com/.
 

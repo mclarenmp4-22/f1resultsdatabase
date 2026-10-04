@@ -13,16 +13,27 @@ EngineModels.StatsF1Data for the matching row.
 """
 
 import json
+import os
 import re
 import sqlite3
 import time
 import unicodedata
 from typing import Optional
-from ollama import chat
 import requests
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from rapidfuzz import fuzz
+if __package__:
+    from scrapers.ai_tiers import ENGINE_MODELS, require_ollama_models, resolve_ai_tier
+else:
+    from ai_tiers import ENGINE_MODELS, require_ollama_models, resolve_ai_tier
+
+
+def write_match_review(path: str, review_rows: list[dict]) -> None:
+    """Write unresolved matches for review by a person or a later AI run."""
+    with open(path, "w", encoding="utf-8") as review_file:
+        json.dump(review_rows, review_file, ensure_ascii=False, indent=2)
+        review_file.write("\n")
 
 
 SYSTEM_PROMPT = """
@@ -362,10 +373,11 @@ def match_engine_model(
     db_models: list[tuple[int, str]],
     season_range: dict[int, tuple[int, int]],
     usage_by_model: dict[int, list[tuple[int, str, str]]],
+    ai_tier: str = "none",
 ) -> Optional[tuple[int, str]]:
     """
     Match a statsf1 entry to a DB EngineModelID.
-    Returns (em_id, stage) where stage is 'era', 'teams', or 'fuzzy'.
+    Returns (em_id, stage) where stage is 'era', 'teams', 'fuzzy', or 'llm'.
     """
     statsf1_short_code = entry["short_code"]
     sf1_years = parse_year_range(entry.get("years") or "")
@@ -415,6 +427,15 @@ def match_engine_model(
     em_id = _fuzzy_match_candidates(statsf1_short_code, fuzzy_pool)
     if em_id is not None:
         return em_id, "fuzzy"
+
+    if ai_tier == "none":
+        print("    AI matching disabled; leaving this entry for review.")
+        return None
+
+    # Import Ollama only on the selected AI path. The default must not require
+    # the Ollama package, daemon, or model files.
+    from ollama import chat
+
     # --- LLM MATCHING FALLBACK ---
     
     # 1. Extract just the names for the LLM to evaluate
@@ -435,7 +456,7 @@ def match_engine_model(
                 time.sleep(2) # Brief backoff before hitting the local server again
                 
             response = chat(
-                model='llama3.1:8b',
+                model=ENGINE_MODELS[ai_tier],
                 messages=[
                     {'role': 'system', 'content': SYSTEM_PROMPT}, 
                     {'role': 'user', 'content': json.dumps(payload)}
@@ -750,7 +771,15 @@ def fetch_page(url: str, session: requests.Session) -> Optional[str]:
 def scrape_pending_engine_models(
     engine_makes: Optional[set[str]] = None,
     db_path: str = "sessionresults.db",
+    ai_tier: Optional[str] = None,
+    review_path: Optional[str] = None,
 ) -> None:
+    ai_tier = resolve_ai_tier(ai_tier)
+    if ai_tier != "none":
+        require_ollama_models(ENGINE_MODELS[ai_tier])
+    review_path = review_path or os.getenv(
+        "ENGINE_MATCH_REVIEW_PATH", "engine_model_match_review.json"
+    )
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
@@ -787,11 +816,15 @@ def scrape_pending_engine_models(
     for row in rows:
         by_make.setdefault(row["EngineMake"], []).append(row)
 
-    print(f"Found {len(rows)} engine models across {len(by_make)} makes to scrape.\n")
+    print(
+        f"Found {len(rows)} engine models across {len(by_make)} makes to scrape "
+        f"using AI tier {ai_tier}.\n"
+    )
 
     session = requests.Session()
     total_matched = 0
     total_unmatched = 0
+    review_rows: list[dict] = []
 
     for make, make_rows in by_make.items():
         slug = slugify_statsf1_constructor_name(make)
@@ -831,9 +864,20 @@ def scrape_pending_engine_models(
                         )
                 continue
 
-            result = match_engine_model(entry, db_models, season_range, usage_by_model)
+            result = match_engine_model(
+                entry, db_models, season_range, usage_by_model, ai_tier
+            )
             if result is None:
                 print(f"  ✗ No DB match for statsf1 entry: {entry['statsf1_name']!r}")
+                review_rows.append({
+                    "type": "statsf1_entry",
+                    "engine_make": make,
+                    "statsf1_name": entry["statsf1_name"],
+                    "short_code": entry["short_code"],
+                    "years": entry.get("years"),
+                    "candidates": [name for _, name in db_models],
+                    "ai_tier": ai_tier,
+                })
                 db = True
                 continue
             em_id, stage = result
@@ -855,17 +899,29 @@ def scrape_pending_engine_models(
         for r in make_rows:
             if r["ID"] not in matched_ids:
                 print(f"  ✗ No statsf1 match for DB row: {r['EngineModel']!r}")
+                review_rows.append({
+                    "type": "database_model",
+                    "engine_make": make,
+                    "engine_model_id": r["ID"],
+                    "engine_model": r["EngineModel"],
+                    "ai_tier": ai_tier,
+                })
                 sf1 = True
                 total_unmatched += 1
 
-        if (db) or (sf1 and db):
+        if db or sf1:
+            write_match_review(review_path, review_rows)
             con.close()
             raise RuntimeError(f"Unmatched entries for {make}, aborting to avoid partial updates.")
         con.commit()
         time.sleep(2)
         print()
 
-    print(f"Done. Matched: {total_matched}, Unmatched: {total_unmatched}")
+    write_match_review(review_path, review_rows)
+    print(
+        f"Done. Matched: {total_matched}, Unmatched: {total_unmatched}. "
+        f"Review written to {review_path}"
+    )
     con.close()
 
 
@@ -873,8 +929,18 @@ def scrape_pending_engine_models(
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    con = sqlite3.connect("../sessionresults.db")
+def main(
+    ai_tier: Optional[str] = None,
+    review_path: Optional[str] = None,
+    db_path: str = "../sessionresults.db",
+):
+    ai_tier = resolve_ai_tier(ai_tier)
+    if ai_tier != "none":
+        require_ollama_models(ENGINE_MODELS[ai_tier])
+    review_path = review_path or os.getenv(
+        "ENGINE_MATCH_REVIEW_PATH", "engine_model_match_review.json"
+    )
+    con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
@@ -903,11 +969,15 @@ def main():
     for row in rows:
         by_make.setdefault(row["EngineMake"], []).append(row)
 
-    print(f"Found {len(rows)} engine models across {len(by_make)} makes to scrape.\n")
+    print(
+        f"Found {len(rows)} engine models across {len(by_make)} makes to scrape "
+        f"using AI tier {ai_tier}.\n"
+    )
 
     session = requests.Session()
     total_matched = 0
     total_unmatched = 0
+    review_rows: list[dict] = []
 
     for make, make_rows in by_make.items():
         slug = slugify_statsf1_constructor_name(make)
@@ -948,9 +1018,20 @@ def main():
                         )
                 continue
 
-            result = match_engine_model(entry, db_models, season_range, usage_by_model)
+            result = match_engine_model(
+                entry, db_models, season_range, usage_by_model, ai_tier
+            )
             if result is None:
                 print(f"  ✗ No DB match for statsf1 entry: {entry['statsf1_name']!r}")
+                review_rows.append({
+                    "type": "statsf1_entry",
+                    "engine_make": make,
+                    "statsf1_name": entry["statsf1_name"],
+                    "short_code": entry["short_code"],
+                    "years": entry.get("years"),
+                    "candidates": [name for _, name in db_models],
+                    "ai_tier": ai_tier,
+                })
                 db = True
                 continue
             em_id, stage = result
@@ -972,16 +1053,29 @@ def main():
         for r in make_rows:
             if r["ID"] not in matched_ids:
                 print(f"  ✗ No statsf1 match for DB row: {r['EngineModel']!r}")
+                review_rows.append({
+                    "type": "database_model",
+                    "engine_make": make,
+                    "engine_model_id": r["ID"],
+                    "engine_model": r["EngineModel"],
+                    "ai_tier": ai_tier,
+                })
                 sf1 = True
                 total_unmatched += 1
 
-        if (db) or (sf1 and db):
+        if db or sf1:
+            write_match_review(review_path, review_rows)
+            con.close()
             raise RuntimeError(f"Unmatched entries for {make}, aborting to avoid partial updates.")
         con.commit()
         time.sleep(2)
         print()
 
-    print(f"Done. Matched: {total_matched}, Unmatched: {total_unmatched}")
+    write_match_review(review_path, review_rows)
+    print(
+        f"Done. Matched: {total_matched}, Unmatched: {total_unmatched}. "
+        f"Review written to {review_path}"
+    )
     con.close()
 
 

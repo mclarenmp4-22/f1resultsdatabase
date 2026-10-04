@@ -25,3 +25,4 @@ For schema, please refer to README.md
 3. Always before assuming anything, think like an F1 expert. What historical caveat have you not accounted for? At the same time, do not overthink and feel free to ask as many questions as you need.
 4. Do not make complex try-except exception handling unless it is absolutely necessary. If something fails in our project, we want it to fail loudly. We don't want to mop it up. After all, this database is designed to be the most comprehensive.
 5. StatsF1 will IP block you if you hammer the server. Please don't hammer the server and add gaps.
+6. Both AI scrapers use the shared `F1_AI_TIER` setting (`none`, `low`, `medium`, or `high`), defaulting to `none`. Keep deterministic engine matching and Tesseract-only circuit labels available without AI dependencies, validate required Ollama models for the selected tier, and never silently guess an unresolved historical engine match.

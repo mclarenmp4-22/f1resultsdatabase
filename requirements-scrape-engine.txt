@@ -1,0 +1,7 @@
+beautifulsoup4
+requests
+deep_translator
+rapidfuzz
+
+# Optional for F1_AI_TIER=low,medium,high:
+# ollama

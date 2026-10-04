@@ -91,26 +91,53 @@ pip install -r requirements.txt
 ```
 
 ### Optional AI dependencies (circuit layouts & engine models)
-The base database builds without these, but two columns need local AI models:
+The base database builds without AI. A single `F1_AI_TIER` environment variable controls the local models used by both scrapers. It accepts `none`, `low`, `medium`, or `high`, and defaults to `none` when unset:
+
+| Tier | Engine matching | Circuit layout OCR |
+|---|---|---|
+| `none` | Deterministic matching; unresolved historical matches stay for review. | CPU image processing and Tesseract only. |
+| `low` | `qwen3-vl:2b` | `qwen3-vl:2b` plus Tesseract. |
+| `medium` | `llama3.1:8b` | Current multi-reader pipeline: `qwen3-vl:4b`, `minicpm-v4.6:1b`, PaddleOCR-VL, docTR, EasyOCR, and TrOCR. |
+| `high` | `llama3.1:70b` | Current multi-reader pipeline with `qwen3-vl:8b` as the map reader. |
+
+To select a tier for the current PowerShell session, set:
+
+```powershell
+$env:F1_AI_TIER = "medium"
+```
+
+To persist it for your Windows user account, run:
+
+```powershell
+[Environment]::SetEnvironmentVariable("F1_AI_TIER", "medium", "User")
+```
+
+Restart PowerShell after setting a user-level value. Model selection does not silently downgrade: the scraper reports the exact `ollama pull` commands if a selected model is missing. Tiers `low`, `medium`, and `high` require Ollama and a running local Ollama service.
+
+The base database builds without these, but two columns can use local AI models:
 - `CircuitLayouts.SVG` are traced from StatsF1 layout maps by `scrapers/circuit_layout_scraper.py`, which reads corner names and turn numbers off the map image with vision/OCR models.
 - `EngineModels.StatsF1Data` is matched to the right StatsF1 engine entry by `scrapers/scrape_engine_models.py`, which uses an LLM as its last-resort matcher (after era, team-usage, and fuzzy matching).
 
-To run either scraper you need:
+Tier `none` still needs the Tesseract binary and Latin tessdata for circuit labels, but does not need Ollama or neural OCR packages. Pull the models required by your selected tier:
 
-1. **Ollama** (https://ollama.com), with these models pulled:
+1. **Ollama** (https://ollama.com):
 ```bash
+ollama pull qwen3-vl:2b
 ollama pull qwen3-vl:4b
+ollama pull qwen3-vl:8b
 ollama pull openbmb/minicpm-v4.6:1b
 ollama pull llama3.1:8b
+ollama pull llama3.1:70b
 ```
-`qwen3-vl:4b` is the primary map-OCR reader (with a repeat-penalty retry, then `minicpm` as fallback); `minicpm` is also the crop arbiter; `llama3.1:8b` is the engine-model matcher.
 
-2. **OCR extras** (all in `requirements.txt`, plus one binary):
+2. **Medium and High OCR extras** (all in `requirements.txt`, plus one binary):
 - `PaddleOCR-VL-1.6` (`PaddlePaddle/PaddleOCR-VL-1.6` via `transformers`), `python-doctr` (DBNet + PARSeq), `easyocr`, and `microsoft/trocr-large-printed` (via `transformers`). These plus qwen form the three first readers and the Tesseract/EasyOCR/TrOCR/minicpm arbiter stage in `read_map_labels`.
 - The Tesseract binary (e.g. `winget install UB-Mannheim.TesseractOCR`) and the `tessdata_best` Latin model: place `script/Latin.traineddata` in `assets/tessdata/` (this path is gitignored). The scraper looks for `tesseract` on PATH, else `C:\Program Files\Tesseract-OCR\tesseract.exe`.
 - `torch`/`torchvision`: install from the PyTorch CUDA index if you have an NVIDIA GPU (the pipeline was tuned for ~6 GB VRAM; models are parked to CPU between maps to free VRAM for qwen). CPU works but is much slower.
 
 3. **StatsF1 rate limit**: both scrapers sleep between requests (up to ~20 s for engine pages, 4–15 s for circuit pages/images) and abort loudly on an IP block. Do not shorten the sleeps.
+
+Normal scraping preserves existing circuit layout SVGs and metadata, updating only their usage dates. It generates a layout only when a new version is found.
 
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
@@ -221,21 +248,21 @@ Both run automatically inside `python writedb.py` for new circuits/engines (`gen
 
 Circuit layouts (`CircuitLayouts.SVG`, `TrackDirection`, `OfficialCircuitName`, `TrackType`):
 - Source: the StatsF1 circuit page map (`GetImage.ashx?id=piste.xxx`) plus the page's `circuittype` box.
-- Pipeline per map in `generate_track_svg`: template-match the chequered flag and walk its leader line to the track for the start/finish bar; detect the red direction arrow(s) by colour/shape and read them against the track outline (centroid reading kept as cross-check); erase flag/arrow/text glyphs from the mask, trace the track into SVG; read corner names/turn numbers with three first readers (PaddleOCR-VL, docTR, qwen3-vl via Ollama) and settle disagreements with Tesseract/EasyOCR/TrOCR/minicpm crops. Anything unresolved is kept with `data-review="1"` rather than dropped.
+- Pipeline per new map in `generate_track_svg`: template-match the chequered flag and walk its leader line to the track for the start/finish bar; detect the red direction arrow(s) by colour/shape and read them against the track outline; trace the track into SVG; read labels according to `F1_AI_TIER`. Existing circuit versions have their usage dates refreshed without regenerating their SVG or metadata.
 - Run the backfill directly:
 ```bash
 python scrapers/circuit_layout_scraper.py
 ```
-This walks the StatsF1 circuits index and updates each layout row. It needs Ollama (`qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`), the `assets/flag_template.png` asset, and the OCR stack above.
+This walks the StatsF1 circuits index, updates usage dates for existing layout versions, and generates rows only for new versions. It needs the `assets/flag_template.png` asset and Tesseract; Ollama and the OCR stack depend on the selected `F1_AI_TIER`.
 
 Engine models (`EngineModels.StatsF1Data`):
 - Source: `https://www.statsf1.com/en/moteur-{slug}.aspx` per engine make, French keys/values translated to English with `deep_translator`.
-- Matching per StatsF1 entry, in order: hardcoded multi-row aliases (`HARDCODED_MULTI_MATCH`), single candidate in the entry's era, team-usage overlap in the overlapping seasons, fuzzy match on the short code, then `llama3.1:8b` via Ollama as a last resort. The run aborts loudly on unmatched entries rather than writing partial data.
+- Matching per StatsF1 entry, in order: hardcoded multi-row aliases (`HARDCODED_MULTI_MATCH`), single candidate in the entry's era, team-usage overlap in the overlapping seasons, fuzzy match on the short code, then the model selected by `F1_AI_TIER` as a last resort. The `none` tier leaves unresolved entries for review; AI-tier runs abort loudly on unmatched entries rather than writing partial data.
 - Run the backfill directly (from the repo root; defaults to `sessionresults.db`):
 ```bash
 python scrapers/scrape_engine_models.py
 ```
-Only rows with `StatsF1Data IS NULL` are scraped. It needs Ollama (`llama3.1:8b`). Expect long sleeps between makes — do not remove them; StatsF1 will IP-block you.
+Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `low`, `medium`, and `high` tiers. Expect long sleeps between makes — do not remove them; StatsF1 will IP-block you.
 
 
 ## Tables
