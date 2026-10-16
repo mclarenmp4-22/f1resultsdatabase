@@ -75,6 +75,9 @@ This database has every single Grand Prix part of the _World Championship_. It d
   24. [WeatherData](#24-weatherdata)
   25. [HistoricalWeather](#25-historicalweather)
   26. [FamilyRelations](#26-familyrelations)
+  27. [ScheduleVersions](#27-scheduleversions)
+  28. [Schedule](#28-schedule)
+  29. [ScheduleSessions](#29-schedulesessions)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md)
@@ -1325,6 +1328,73 @@ This table contains family relationships between drivers in Formula 1 history. E
 - Gilles Villeneuve Villeneuve → Jacques Villeneuve Villeneuve: "Father"
 - Michael Schumacher → Ralf Schumacher: "Brother"
 - Ralf Schumacher → Michael Schumacher: "Brother"
+
+27. ### ScheduleVersions:
+This table contains snapshots of each season's **planned** calendar. The calendar can change during a season (races cancelled, postponed, or replaced), so instead of overwriting it, a new version is saved every time the calendar changes. Each run of `writedb.py` fetches the current season's calendar and only saves a new version if it differs from the latest one. Schedules are available from 2018 onwards, from FastF1 (which reads them from the [f1schedule](https://github.com/theOehrly/f1schedule) repository). Pre-season testing is not included.
+
+A season that was already over when it was first snapshotted only has its final calendar (version 1), as earlier versions are not available from the source. Cancelled and postponed events of those seasons are therefore not recorded yet.
+
+**Columns:**
+
+- **ID**: Unique schedule version ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+- **Season**: The season this calendar is for. _INTEGER_
+- **VersionNumber**: Version of the season's calendar, starting at 1 for the first snapshot. _INTEGER_
+- **RetrievedAtUTC**: When the calendar was fetched, as a UTC ISO 8601 timestamp. _TEXT_
+- **Source**: Where the calendar came from (e.g. "fastf1"). _TEXT_
+- **ContentHash**: SHA-256 hash of the fetched calendar, used to detect whether it has changed since the previous version. _TEXT_
+- **UNIQUE constraint**: (Season, VersionNumber).
+
+28. ### Schedule:
+This table contains the events (Grands Prix) of each schedule version. Every version contains the full picture of the season as it was planned at that time: the events currently on the calendar, plus any events that were cancelled earlier in the season.
+
+These are *planned* events and sessions. They are intentionally kept apart from `GrandsPrix` and `Sessions`, which hold what actually took place and what results reference.
+
+An event is identified across versions by its **EventName and Location together**. A Grand Prix that keeps its name but moves venue is therefore a different event. For example, in 2026 the Bahrain Grand Prix at Sakhir was cancelled, and a Bahrain Grand Prix was later added at Sepang (Kuala Lumpur); these are two separate rows.
+
+**Columns:**
+
+- **ID**: Unique schedule event ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+- **ScheduleVersionID**: Foreign key to ScheduleVersions. _INTEGER_
+- **Season**: The season. _INTEGER_
+- **RoundNumber**: Round number in that version's calendar. NULL for cancelled events, as they are no longer a round. _INTEGER_
+- **EventName**: Name of the event (e.g. "Austrian Grand Prix"). _TEXT_
+- **OfficialEventName**: Official name of the event. _TEXT_
+- **Country**: Country of the event. _TEXT_
+- **Location**: Location of the event (e.g. "Spielberg"). _TEXT_
+- **EventDate**: Local date of race day, as YYYY-MM-DD. _TEXT_
+- **EventFormat**: Weekend format (e.g. "conventional", "sprint", "sprint_shootout", "sprint_qualifying"). _TEXT_
+- **Status**: One of:
+  - `scheduled`: on the calendar (including events newly added to it).
+  - `postponed`: on the calendar, but with a later date than in the previous version. This includes a cancelled event that comes back on a later date. Once an event is postponed, it stays `postponed` in later versions.
+  - `cancelled`: was in the previous version, but is no longer on the calendar. It is carried forward, along with the sessions that were planned for it, into all later versions.
+
+  _TEXT_
+- **GrandPrixID**: Foreign key to GrandsPrix: the Grand Prix held on this event's date, or one day either side of it, as `EventDate` is the local date and a race run in the evening can fall on the next day in UTC (e.g. the Las Vegas Grand Prix). NULL if the event has not been held (yet) or was cancelled. _INTEGER_
+- **UNIQUE constraint**: (ScheduleVersionID, EventName, Location).
+
+**Example:** the latest version of the 2026 calendar, including cancelled events:
+```sql
+SELECT s.RoundNumber, s.EventName, s.Location, s.EventDate, s.Status
+FROM Schedule s
+JOIN ScheduleVersions v ON s.ScheduleVersionID = v.ID
+WHERE v.Season = 2026
+  AND v.VersionNumber = (SELECT MAX(VersionNumber) FROM ScheduleVersions WHERE Season = 2026)
+ORDER BY s.EventDate;
+```
+
+29. ### ScheduleSessions:
+This table contains the planned sessions of each event in the Schedule table, with their planned start times in both UTC and local time. A cancelled event keeps the sessions that had been planned for it.
+
+**Columns:**
+
+- **ID**: Unique schedule session ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+- **ScheduleID**: Foreign key to Schedule. _INTEGER_
+- **SessionName**: Name of the session (e.g. "Practice 1", "Sprint Qualifying", "Race"). _TEXT_
+- **SessionNumber**: Position of the session within the event, from 1 to 5. _INTEGER_
+- **StartTimeTimestampUTC**: Planned start time as a Unix timestamp in seconds, in UTC. NULL if the time is not known. _INTEGER_
+- **StartTimeinDatetimeUTC**: Planned start time as a UTC ISO 8601 datetime. NULL if the time is not known. _TEXT_
+- **StartTimeinDatetime**: Planned start time as a local ISO 8601 datetime at the circuit, including the UTC offset (e.g. `2023-04-28T13:30:00+04:00`). NULL if the time is not known. _TEXT_
+- **UNIQUE constraint**: (ScheduleID, SessionNumber).
 
 
 ## Roadmap:
