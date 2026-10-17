@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather", "ScheduleVersions", "Schedule", "ScheduleSessions"
 ]
 
 for table in tables:
@@ -873,6 +873,46 @@ cursor.execute('''CREATE TABLE FamilyRelations (
     FOREIGN KEY (DriverID) REFERENCES Drivers(ID),
     FOREIGN KEY (RelatedDriverID) REFERENCES Drivers(ID),
     UNIQUE (DriverID, RelatedDriverID)
+)''')
+
+cursor.execute('''CREATE TABLE ScheduleVersions (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    Season INTEGER,
+    VersionNumber INTEGER,
+    RetrievedAtUTC TEXT,
+    Source TEXT,
+    ContentHash TEXT,
+    UNIQUE (Season, VersionNumber)
+)''')
+
+cursor.execute('''CREATE TABLE Schedule (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    ScheduleVersionID INTEGER,
+    Season INTEGER,
+    RoundNumber INTEGER,
+    EventName TEXT,
+    OfficialEventName TEXT,
+    Country TEXT,
+    Location TEXT,
+    EventDate TEXT,
+    EventFormat TEXT,
+    Status TEXT,
+    GrandPrixID INTEGER,
+    FOREIGN KEY (ScheduleVersionID) REFERENCES ScheduleVersions(ID),
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID),
+    UNIQUE (ScheduleVersionID, EventName, Location)
+)''')
+
+cursor.execute('''CREATE TABLE ScheduleSessions (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    ScheduleID INTEGER,
+    SessionName TEXT,
+    SessionNumber INTEGER,
+    StartTimeTimestampUTC INTEGER,
+    StartTimeinDatetimeUTC TEXT,
+    StartTimeinDatetime TEXT,
+    FOREIGN KEY (ScheduleID) REFERENCES Schedule(ID),
+    UNIQUE (ScheduleID, SessionNumber)
 )''')
 
 conn.commit()

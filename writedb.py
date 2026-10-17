@@ -7,6 +7,7 @@ import time
 import re
 import datetime
 import json
+import hashlib
 import sys
 import unicodedata
 from decimal import Decimal
@@ -938,6 +939,202 @@ def save_historical_weather_data(cursor, year, round_number, grandprix_name, gra
             ))
 
         print(f"Historical weather saved for {grandprix_name} {session_name}")
+
+
+# --- Planned schedule ---------------------------------------------------------
+# Snapshots of the planned calendar, kept as versions so that calendar changes
+# during a season (cancellations, postponements, replacements) are not lost.
+# This is deliberately separate from Sessions: Sessions holds sessions that
+# actually ran and that results reference, whereas these are planned sessions.
+
+SCHEDULE_FIRST_SEASON = 2018  # earliest season FastF1's own backend has a full session schedule for
+SCHEDULE_SOURCE = 'fastf1'
+
+
+def get_planned_schedule(year):
+    # backend='fastf1' is forced on purpose. Left on its default, FastF1 silently
+    # falls back to Ergast when its primary source is unreachable, and Ergast has
+    # no session times, so the fallback would be recorded as a (false) change to
+    # the calendar instead of failing loudly.
+    # Testing is excluded: this is the race calendar.
+    schedule = fastf1.get_event_schedule(year, include_testing=False, backend='fastf1')
+
+    events = []
+    for _, row in schedule.iterrows():
+        sessions = []
+        for number in range(1, 6):
+            session_name = row[f'Session{number}']
+            if pd.isna(session_name) or not str(session_name).strip():
+                continue  # this event has fewer than 5 sessions
+
+            start_utc = row[f'Session{number}DateUtc']
+            start_local = row[f'Session{number}Date']
+            if pd.isna(start_utc):
+                # Session is on the calendar but its time is not known (yet).
+                sessions.append({'number': number, 'name': session_name,
+                                 'timestamp_utc': None, 'start_utc': None, 'start_local': None})
+                continue
+
+            start_utc = start_utc.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+            sessions.append({
+                'number': number,
+                'name': session_name,
+                'timestamp_utc': int(start_utc.timestamp()),
+                'start_utc': start_utc.isoformat(),
+                'start_local': None if pd.isna(start_local) else start_local.isoformat(),
+            })
+
+        events.append({
+            'round_number': int(row['RoundNumber']),
+            'event_name': row['EventName'],
+            'official_event_name': row['OfficialEventName'],
+            'country': row['Country'],
+            'location': row['Location'],
+            'event_date': row['EventDate'].strftime('%Y-%m-%d'),  # local date of race day
+            'event_format': row['EventFormat'],
+            'sessions': sessions,
+        })
+
+    # An event is identified across versions by (EventName, Location). A Grand Prix
+    # that keeps its name but changes venue is therefore a different event: the
+    # 2026 Bahrain Grand Prix was cancelled at Sakhir and a Bahrain Grand Prix was
+    # then added at Sepang.
+    keys = [(event['event_name'], event['location']) for event in events]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"The {year} schedule has two events with the same EventName and Location, so they cannot be told apart between versions.")
+
+    return events
+
+
+def hash_schedule_events(events):
+    canonical = json.dumps(
+        sorted(events, key=lambda event: (event['round_number'], event['event_name'])),
+        sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def save_schedule_snapshot(cursor, year):
+    """
+    Saves the season's current planned calendar as a new version, but only if it
+    differs from the latest stored version. Returns True if a version was saved.
+
+    Status of each event in the new version:
+    - 'cancelled': it was in the previous version but is no longer on the calendar.
+      It is carried forward (with its planned sessions) into this and all later
+      versions, with a NULL RoundNumber as it is no longer a round.
+    - 'postponed': it is on the calendar with a later date than in the previous
+      version (this includes a cancelled event that comes back on a later date).
+      Once postponed it stays postponed in later versions.
+    - 'scheduled': everything else, including events added to the calendar.
+    """
+    events = get_planned_schedule(year)
+    content_hash = hash_schedule_events(events)
+
+    cursor.execute("SELECT ID, VersionNumber, ContentHash FROM ScheduleVersions WHERE Season = ? ORDER BY VersionNumber DESC LIMIT 1", (year,))
+    previous = cursor.fetchone()
+    if previous and previous[2] == content_hash:
+        return False
+
+    previous_events = {}
+    if previous:
+        cursor.execute("SELECT ID, EventName, Location, EventDate, Status FROM Schedule WHERE ScheduleVersionID = ?", (previous[0],))
+        for schedule_id, event_name, location, event_date, status in cursor.fetchall():
+            previous_events[(event_name, location)] = (schedule_id, event_date, status)
+
+    version_number = previous[1] + 1 if previous else 1
+    cursor.execute("""
+        INSERT INTO ScheduleVersions (Season, VersionNumber, RetrievedAtUTC, Source, ContentHash)
+        VALUES (?,?,?,?,?)
+    """, (year, version_number, datetime.datetime.now(datetime.timezone.utc).isoformat(), SCHEDULE_SOURCE, content_hash))
+    version_id = cursor.lastrowid
+
+    current_keys = set()
+    for event in events:
+        key = (event['event_name'], event['location'])
+        current_keys.add(key)
+
+        status = 'scheduled'
+        earlier = previous_events.get(key)
+        if earlier and (earlier[2] == 'postponed' or event['event_date'] > earlier[1]):
+            status = 'postponed'
+
+        cursor.execute("""
+            INSERT INTO Schedule (ScheduleVersionID, Season, RoundNumber, EventName, OfficialEventName,
+                                  Country, Location, EventDate, EventFormat, Status)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (version_id, year, event['round_number'], event['event_name'], event['official_event_name'],
+              event['country'], event['location'], event['event_date'], event['event_format'], status))
+        schedule_id = cursor.lastrowid
+
+        for session in event['sessions']:
+            cursor.execute("""
+                INSERT INTO ScheduleSessions (ScheduleID, SessionName, SessionNumber, StartTimeTimestampUTC,
+                                              StartTimeinDatetimeUTC, StartTimeinDatetime)
+                VALUES (?,?,?,?,?,?)
+            """, (schedule_id, session['name'], session['number'], session['timestamp_utc'],
+                  session['start_utc'], session['start_local']))
+
+    for key, (old_schedule_id, _, _) in previous_events.items():
+        if key in current_keys:
+            continue
+        cursor.execute("""
+            INSERT INTO Schedule (ScheduleVersionID, Season, RoundNumber, EventName, OfficialEventName,
+                                  Country, Location, EventDate, EventFormat, Status)
+            SELECT ?, Season, NULL, EventName, OfficialEventName, Country, Location, EventDate, EventFormat, 'cancelled'
+            FROM Schedule WHERE ID = ?
+        """, (version_id, old_schedule_id))
+        cancelled_schedule_id = cursor.lastrowid
+        cursor.execute("""
+            INSERT INTO ScheduleSessions (ScheduleID, SessionName, SessionNumber, StartTimeTimestampUTC,
+                                          StartTimeinDatetimeUTC, StartTimeinDatetime)
+            SELECT ?, SessionName, SessionNumber, StartTimeTimestampUTC, StartTimeinDatetimeUTC, StartTimeinDatetime
+            FROM ScheduleSessions WHERE ScheduleID = ?
+        """, (cancelled_schedule_id, old_schedule_id))
+
+    return True
+
+
+def link_schedule_to_grandsprix(cursor):
+    # Links an event to the Grand Prix held on its date, allowing one day of difference.
+    # EventDate is the local date, and a race run in the evening can already be on the
+    # next day in UTC: the Las Vegas Grand Prix is raced on Saturday night local time.
+    # Race weekends are at least a week apart, so this cannot match the wrong race.
+    # Events that have not been held (yet), and cancelled events, are left NULL;
+    # nothing else is guessed.
+    # Two passes, exact date first, so that an exact match always wins.
+    cursor.execute("""
+        UPDATE Schedule
+        SET GrandPrixID = (
+            SELECT GrandsPrix.ID FROM GrandsPrix
+            WHERE GrandsPrix.Season = Schedule.Season AND GrandsPrix.DateInDateTime = Schedule.EventDate
+        )
+        WHERE GrandPrixID IS NULL AND Status != 'cancelled'
+    """)
+    cursor.execute("""
+        UPDATE Schedule
+        SET GrandPrixID = (
+            SELECT GrandsPrix.ID FROM GrandsPrix
+            WHERE GrandsPrix.Season = Schedule.Season
+              AND ABS(julianday(GrandsPrix.DateInDateTime) - julianday(Schedule.EventDate)) <= 1
+            ORDER BY GrandsPrix.ID
+            LIMIT 1
+        )
+        WHERE GrandPrixID IS NULL AND Status != 'cancelled'
+    """)
+
+
+def update_schedules(cursor):
+    current_year = datetime.datetime.now().year
+    for year in range(SCHEDULE_FIRST_SEASON, current_year + 1):
+        cursor.execute("SELECT 1 FROM ScheduleVersions WHERE Season = ? LIMIT 1", (year,))
+        has_version = cursor.fetchone() is not None
+        # A finished season's calendar can no longer change, so it is only snapshotted
+        # once. The current season is checked on every run.
+        if has_version and year != current_year:
+            continue
+        if save_schedule_snapshot(cursor, year):
+            print(f"Schedule snapshot saved for {year}")
+    link_schedule_to_grandsprix(cursor)
 
 
 #This function gets the birthdate and nationality of a driver from their statsf1.com page. 
@@ -6323,6 +6520,10 @@ for table in tables_to_reset:
 
 conn.commit()
 print("All stats successfully updated and flags reset.")
+
+update_schedules(cur)
+conn.commit()
+print("Schedule updated.")
 
 print("Running database optimization (this may take a moment)...")
 cur.execute("VACUUM")
