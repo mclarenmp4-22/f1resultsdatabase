@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather", "ScheduleVersions", "Schedule", "ScheduleSessions"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather", "ScheduleVersions", "Schedule", "ScheduleSessions", "CircuitMarkers"
 ]
 
 for table in tables:
@@ -102,6 +102,8 @@ cursor.execute('''CREATE TABLE CircuitLayouts (
     FirstGrandPrixID INTEGER,
     LastGrandPrixID INTEGER,
     needstatsupdate BOOLEAN DEFAULT 0,
+    Rotation REAL,
+    MarkersSourceYear INTEGER,
     FOREIGN KEY (FirstGrandPrixID) REFERENCES GrandsPrix(ID),
     FOREIGN KEY (LastGrandPrixID) REFERENCES GrandsPrix(ID)
 )''')
@@ -913,6 +915,19 @@ cursor.execute('''CREATE TABLE ScheduleSessions (
     StartTimeinDatetime TEXT,
     FOREIGN KEY (ScheduleID) REFERENCES Schedule(ID),
     UNIQUE (ScheduleID, SessionNumber)
+)''')
+
+cursor.execute('''CREATE TABLE CircuitMarkers (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    CircuitLayoutID INTEGER,
+    MarkerType TEXT,
+    Number INTEGER,
+    Letter TEXT,
+    X REAL,
+    Y REAL,
+    Angle REAL,
+    FOREIGN KEY (CircuitLayoutID) REFERENCES CircuitLayouts(ID),
+    UNIQUE (CircuitLayoutID, MarkerType, Number, Letter)
 )''')
 
 conn.commit()

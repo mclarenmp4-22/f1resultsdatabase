@@ -78,6 +78,7 @@ This database has every single Grand Prix part of the _World Championship_. It d
   27. [ScheduleVersions](#27-scheduleversions)
   28. [Schedule](#28-schedule)
   29. [ScheduleSessions](#29-schedulesessions)
+  30. [CircuitMarkers](#30-circuitmarkers)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md)
@@ -460,6 +461,8 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
    - **FirstGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **LastGrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
+   - **Rotation**: Rotation of the circuit in degrees: the angle the circuit's X/Y coordinates need to be rotated by to match the orientation of the official track map. From MultiViewer, like the rows in CircuitMarkers. NULL if there are no markers for the layout. _REAL_
+   - **MarkersSourceYear**: Season of the MultiViewer record the layout's markers were taken from. NULL if MultiViewer has no record for a season the layout was raced in. It is also set when no markers were saved for the layout because the record was empty, or identical to that of a later layout of the same circuit. _INTEGER_
 
 4. ### GrandsPrix
    This table contains all Grands Prix.  
@@ -1396,6 +1399,24 @@ This table contains the planned sessions of each event in the Schedule table, wi
 - **StartTimeinDatetime**: Planned start time as a local ISO 8601 datetime at the circuit, including the UTC offset (e.g. `2023-04-28T13:30:00+04:00`). NULL if the time is not known. _TEXT_
 - **UNIQUE constraint**: (ScheduleID, SessionNumber).
 
+30. ### CircuitMarkers:
+This table contains the positions of the corners, marshal lights and marshal sectors of a circuit layout, from [MultiViewer](https://multiviewer.app/) (the data FastF1 provides as `CircuitInfo`). It can be used to annotate a track map, and together with `CircuitLayouts.Rotation` to line telemetry coordinates up with the official track map. The data is drawn by hand, so it is good for visualisation but not precise.
+
+Positions are in the same coordinate system as FastF1's position telemetry. They are not GPS coordinates, and are not in the coordinate system of `CircuitLayouts.SVG`.
+
+MultiViewer only has records for seasons since 2018, so only layouts raced since then can have markers. Some layouts have none, and not every layout has all three types: for example, Mugello only has marshal sectors.
+
+**Columns:**
+
+- **ID**: Unique marker ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+- **CircuitLayoutID**: Foreign key to CircuitLayouts. _INTEGER_
+- **MarkerType**: `corner`, `marshal_light` or `marshal_sector`. _TEXT_
+- **Number**: Number of the corner, marshal light or marshal sector. _INTEGER_
+- **Letter**: Distinguishes corners that share a number on some circuits, e.g. the "A" in "2A". An empty string if there is none. _TEXT_
+- **X**: X position on the track map. _REAL_
+- **Y**: Y position on the track map. _REAL_
+- **Angle**: Angle in degrees used to offset a marker's label on a track map, usually at right angles to the track. _REAL_
+- **UNIQUE constraint**: (CircuitLayoutID, MarkerType, Number, Letter).
 
 ## Roadmap:
 Please check our [roadmap](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/ROADMAP.md) for the next steps.
