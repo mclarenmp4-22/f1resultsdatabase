@@ -1137,6 +1137,170 @@ def update_schedules(cursor):
     link_schedule_to_grandsprix(cursor)
 
 
+# --- Circuit markers ----------------------------------------------------------
+# Positions of corners, marshal lights and marshal sectors, and the rotation of each circuit's
+# coordinate system, from MultiViewer (the data FastF1 exposes as CircuitInfo). It is drawn by
+# hand, so it is good for annotating maps but not precise.
+
+MULTIVIEWER_API_URL = 'https://api.multiviewer.app/api/v1/circuits'
+MULTIVIEWER_FIRST_SEASON = 2018  # MultiViewer has no records for earlier seasons
+
+# Circuits.ID -> MultiViewer circuit key. A circuit without an entry has no MultiViewer data
+# (yet): Circuito de Madring, for example. A layout can belong to more than one circuit (the
+# Red Bull Ring layout was the A1-Ring's), so a layout uses the entry of the circuit it was
+# raced as most recently.
+MULTIVIEWER_CIRCUIT_KEYS = {
+    1030: 147,  # Algarve International Circuit
+    454: 6,     # Imola
+    1027: 146,  # Mugello (marshal sectors only)
+    7: 39,      # Monza
+    435: 65,    # Mexico City
+    486: 14,    # Interlagos
+    716: 63,    # Bahrain
+    943: 144,   # Baku
+    327: 23,    # Montreal
+    22: 55,     # Zandvoort
+    202: 28,    # Paul Ricard
+    514: 15,    # Barcelona-Catalunya
+    2: 22,      # Monaco
+    5: 7,       # Spa-Francorchamps
+    877: 9,     # Austin
+    192: 34,    # Hockenheim
+    431: 4,     # Hungaroring
+    1032: 59,   # Istanbul
+    1075: 149,  # Jeddah
+    1139: 152,  # Las Vegas
+    1074: 150,  # Lusail
+    800: 61,    # Marina Bay
+    582: 10,    # Melbourne
+    1081: 151,  # Miami
+    13: 72,     # Nurburgring
+    905: 19,    # Red Bull Ring
+    729: 49,    # Shanghai
+    1: 2,       # Silverstone
+    913: 79,    # Sochi
+    451: 46,    # Suzuka
+    820: 70,    # Yas Marina
+}
+
+# A layout that is a different MultiViewer circuit from the rest of its circuit, keyed by
+# CircuitLayouts.FirstGrandPrix. The 2020 Sakhir Grand Prix was raced on Bahrain's outer track,
+# which MultiViewer lists separately (and without any markers).
+MULTIVIEWER_LAYOUT_KEY_OVERRIDES = {'2020 Sakhir Grand Prix': 148}
+
+MULTIVIEWER_MARKER_TYPES = (('corners', 'corner'), ('marshalLights', 'marshal_light'), ('marshalSectors', 'marshal_sector'))
+
+
+def get_multiviewer_json(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+def get_multiviewer_markers(key, year):
+    """One MultiViewer record as (marker rows, rotation). Each marker row is
+    (type, number, letter, x, y, angle)."""
+    record = get_multiviewer_json(f"{MULTIVIEWER_API_URL}/{key}/{year}")
+    # For a year it has no record for, MultiViewer silently answers with its nearest record.
+    # The circuit list says which years exist, so this should never differ, but data from
+    # another season must not be stored by accident.
+    if record['circuitKey'] != key or record['year'] != year:
+        raise ValueError(f"Asked MultiViewer for circuit {key} in {year}, but got circuit {record['circuitKey']} in {record['year']}")
+
+    markers = []
+    for field, marker_type in MULTIVIEWER_MARKER_TYPES:
+        for entry in record.get(field) or []:
+            angle = entry.get('angle')
+            markers.append((marker_type, int(entry['number']), str(entry.get('letter') or ''),
+                            float(entry['trackPosition']['x']), float(entry['trackPosition']['y']),
+                            None if angle is None else float(angle)))
+    rotation = record.get('rotation')
+    return markers, None if rotation is None else float(rotation)
+
+
+def update_circuit_markers(cursor):
+    listing = get_multiviewer_json(MULTIVIEWER_API_URL)
+
+    cursor.execute("""
+        SELECT cl.ID, cl.FirstGrandPrix, MIN(g.Season), MAX(g.Season), cl.MarkersSourceYear
+        FROM GrandsPrix g
+        JOIN CircuitLayouts cl ON g.CircuitLayoutID = cl.ID
+        GROUP BY cl.ID
+        HAVING MAX(g.Season) >= ?
+    """, (MULTIVIEWER_FIRST_SEASON,))
+
+    circuits = {}  # MultiViewer circuit key -> the layouts of it that MultiViewer has a record for
+    for layout_id, first_grandprix, first_season, last_season, stored_year in cursor.fetchall():
+        cursor.execute("""
+            SELECT g.CircuitID, c.CircuitName
+            FROM GrandsPrix g
+            JOIN Circuits c ON g.CircuitID = c.ID
+            WHERE g.CircuitLayoutID = ?
+            GROUP BY g.CircuitID
+            ORDER BY MAX(g.Season) DESC
+        """, (layout_id,))
+        layout_circuits = cursor.fetchall()
+        circuit_name = layout_circuits[0][1]
+
+        key = MULTIVIEWER_LAYOUT_KEY_OVERRIDES.get(first_grandprix)
+        if key is None:
+            key = next((MULTIVIEWER_CIRCUIT_KEYS[circuit_id] for circuit_id, _ in layout_circuits if circuit_id in MULTIVIEWER_CIRCUIT_KEYS), None)
+        if key is None:
+            print(f"No MultiViewer circuit for {circuit_name}, no markers saved")
+            continue
+        if str(key) not in listing:
+            raise ValueError(f"MultiViewer has no circuit {key}, which is the one set for {circuit_name}")
+
+        # The latest record from a season this layout was raced in. MultiViewer's records
+        # are per race, so this is the most recent race held on the layout that it has.
+        years = [year for year in listing[str(key)]['years'] if first_season <= year <= last_season]
+        if not years:
+            continue
+        circuits.setdefault(key, []).append({
+            'layout_id': layout_id, 'circuit_name': circuit_name, 'key': key, 'record_year': max(years),
+            'first_season': first_season, 'last_season': last_season, 'stored_year': stored_year,
+        })
+
+    saved = 0
+    for layouts in circuits.values():
+        if all(layout['stored_year'] == layout['record_year'] for layout in layouts):
+            continue  # nothing new from MultiViewer since the last run
+        for layout in layouts:
+            layout['markers'], layout['rotation'] = get_multiviewer_markers(layout['key'], layout['record_year'])
+            time.sleep(0.25)
+
+        # MultiViewer can copy a circuit's newest markers onto its records for older seasons:
+        # its 2019 Australian Grand Prix record has exactly the markers of the 2022 one, though
+        # the circuit was redesigned in between. Two layouts of the same circuit cannot both
+        # have identical markers, so only the layout raced most recently keeps them.
+        same_markers = {}
+        for layout in layouts:
+            if layout['markers']:
+                geometry = tuple((marker[0], marker[1], marker[2], round(marker[3]), round(marker[4])) for marker in layout['markers'])
+                same_markers.setdefault(geometry, []).append(layout)
+        keep = {max(group, key=lambda layout: (layout['last_season'], layout['first_season']))['layout_id'] for group in same_markers.values()}
+
+        for layout in layouts:
+            cursor.execute("DELETE FROM CircuitMarkers WHERE CircuitLayoutID = ?", (layout['layout_id'],))
+            rotation = None
+            if layout['layout_id'] in keep:
+                cursor.executemany("""
+                    INSERT INTO CircuitMarkers (CircuitLayoutID, MarkerType, Number, Letter, X, Y, Angle)
+                    VALUES (?,?,?,?,?,?,?)
+                """, [(layout['layout_id'], *marker) for marker in layout['markers']])
+                rotation = layout['rotation']
+                saved += 1
+            elif layout['markers']:
+                print(f"No markers saved for {layout['circuit_name']} layout {layout['layout_id']}: MultiViewer gives it the same markers as a later layout")
+            else:
+                print(f"No markers saved for {layout['circuit_name']} layout {layout['layout_id']}: MultiViewer has none for it")
+            # The year is stored even when nothing was saved, so that this layout is not fetched again.
+            cursor.execute("UPDATE CircuitLayouts SET Rotation = ?, MarkersSourceYear = ? WHERE ID = ?",
+                           (rotation, layout['record_year'], layout['layout_id']))
+    if saved:
+        print(f"Circuit markers saved for {saved} layouts")
+
+
 #This function gets the birthdate and nationality of a driver from their statsf1.com page. 
 def fetch_driver_info(driver_name):
     # Convert "George Russell" → "george-russell"
@@ -6524,6 +6688,10 @@ print("All stats successfully updated and flags reset.")
 update_schedules(cur)
 conn.commit()
 print("Schedule updated.")
+
+update_circuit_markers(cur)
+conn.commit()
+print("Circuit markers updated.")
 
 print("Running database optimization (this may take a moment)...")
 cur.execute("VACUUM")
