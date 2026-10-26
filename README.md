@@ -75,6 +75,7 @@ This database has every single Grand Prix part of the _World Championship_. It d
   24. [WeatherData](#24-weatherdata)
   25. [HistoricalWeather](#25-historicalweather)
   26. [FamilyRelations](#26-familyrelations)
+  27. [RedFlags](#27-redflags)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Code of Conduct](https://github.com/mclarenmp4-22/f1resultsdatabase/blob/main/CODE_OF_CONDUCT.md)
@@ -1325,6 +1326,28 @@ This table contains family relationships between drivers in Formula 1 history. E
 - Gilles Villeneuve Villeneuve → Jacques Villeneuve Villeneuve: "Father"
 - Michael Schumacher → Ralf Schumacher: "Brother"
 - Ralf Schumacher → Michael Schumacher: "Brother"
+
+27. ### RedFlags
+    This table contains details of all red flags shown during World Championship Grands Prix, scraped from Wikipedia.
+    
+    **Restarted Codes:**
+    - `N`: Race was not restarted
+    - `Y`: Race was restarted over the original distance
+    - `R`: Race was resumed to complete the originally scheduled distance
+    - `S`: Race was restarted or resumed with the originally scheduled distance not completed
+
+    **Columns:**
+    - **ID**: Unique red flag ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
+    - **GrandPrix**: Full Grand Prix name. _TEXT_
+    - **Season**: Year of the Grand Prix. _INTEGER_
+    - **Lap**: Lap number on which the red flag was displayed. _INTEGER_
+    - **RestartedCode**: Single-letter code indicating restart classification (`N`, `Y`, `R`, or `S`). _TEXT_
+    - **RestartedDescription**: Plain text description of the restart status code. _TEXT_
+    - **LeaderAtStoppage**: Driver leading the race at the time of stoppage / red flag. _TEXT_
+    - **Reason**: Incident or weather condition that prompted the red flag. _TEXT_
+    - **Notes**: Additional context regarding drivers who failed to make the restart or specific race circumstances. _TEXT_
+    - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
+    - **LeaderID**: Foreign key to Drivers. _INTEGER_
 
 
 ## Roadmap:

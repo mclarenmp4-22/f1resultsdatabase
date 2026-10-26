@@ -85,6 +85,18 @@ def scrape_historical_practice(year, gp):
     scrape_historical_practice_sessions(years={year}, grandprix_names=[gp])
 
 
+def save_red_flags(cursor, grandprix_name, grandprix_id):
+    """
+    Refreshes the RedFlags rows for a single Grand Prix as part of the race
+    pipeline, using writedb.py's own cursor (no commit here; the season-end
+    commit covers it). The Wikipedia list is fetched once and cached inside
+    the scraper module, so this stays cheap per race.
+    """
+    from scrapers.scrape_red_flags import save_red_flags_for_race
+
+    save_red_flags_for_race(cursor, grandprix_name, grandprix_id)
+
+
 def parse_coordinate(value):
     match = re.search(r'-?\d+(?:\.\d+)?', str(value).strip())
     if not match:
@@ -224,7 +236,7 @@ def parse_designers(html):
             })
         else:
             designers.append({
-                "name": translate_reason(part),
+                "name": translate_reason(part) if part != "Conrero" else "Conrero",
                 "role": None
             })
 
@@ -4738,7 +4750,7 @@ months = {
 #Also, check if there are are no circuit layouts in the CircuitLayouts table. 
 # If there are, then we can skip the circuit scraping and just do the mapping of grand prix to circuit layout id. 
 # If there are no circuit layouts, then we need to do the full scrape of circuits and circuit layouts.
-resetrun = False
+
 cur.execute("SELECT COUNT(*) FROM CircuitLayouts")
 if cur.fetchone()[0] == 0:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
@@ -4772,7 +4784,7 @@ if cur.fetchone()[0] == 0:
                     cur, lat, lng, elevation, country, dates, version,
                     f'https://www.statsf1.com{layoutimg}', circuit_text,
                 )
-                resetrun = True
+                
 else:
     cur.execute("SELECT COUNT(*) FROM GrandsPrix")
     #if there are less than 1149 grands prix in the database, this will suffice.
@@ -4938,12 +4950,15 @@ for season in seasons[index:]:
             race_info['timezone'] = get_timezone_from_coords(race_info['latitude'], race_info['longitude'])
             race_info['country'] = get_country_from_coords(race_info['latitude'], race_info['longitude'])
             #If this is being updated, not reset, and this start off from the last grand prix, then we check if there are new circuit layouts for the circuit since the last grand prix, and if there are, we add them to the database.
-            if race_info['race_number'] > last_grandprix_id > 1163 and not resetrun: 
-                #temporary solution. 1149 is the 2025 Abu Dhabi Grand Prix, which is the last grand prix in the database currently, 
-                #so if the last grand prix id is greater than 1149, it means we are updating and not resetting, 
-                # and we can check for new circuit layouts since the last grand prix.
-                #this has been updated to 1163, so before the Madrid race.
-                #TODO: find a solution to this.
+            cur.execute(
+                "SELECT 1 FROM CircuitLayouts "
+                "WHERE Latitude = ? AND Longitude = ? "
+                "AND GrandPrixDates LIKE ? LIMIT 1",
+                (race_info['latitude'], race_info['longitude'], f"%{race_info['dateindatetime'].strftime('%Y%m%d')}%"),
+            )
+            layout_exists_for_race = cur.fetchone() is not None
+            if (race_info['race_number'] > last_grandprix_id 
+                    and not layout_exists_for_race):
                 open_url(f"https://www.statsf1.com/en/circuit-{race_info['track_name'].replace(' ', '-').lower()}.aspx")  
                 official_circuit_name, track_type = parse_circuit_metadata(soup, fallback_name=race_info['track_name'])
                 lat, lng = mappings[race_info['track_name']]
@@ -5109,6 +5124,7 @@ for season in seasons[index:]:
         save_race_control_messages(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         save_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         save_historical_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
+        save_red_flags(cur, gp, race_info['race_number'])
         if race_info['race_number'] > 344: #only after 1981 argentine grand prix
             grandprixlinks.append({'href': f"https://motorsportstats.com/api/results-classification?sessionSlug=fia-formula-one-world-championship_{year}_{msgrandprix}_race"})
 

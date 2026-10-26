@@ -8,7 +8,7 @@ tables = [
     "Engines", "Tyres", "Chassis", "EngineModels", "Circuits", "CircuitLayouts",
     "GrandPrixResults", "PitStopSummary", "LapByLap",
     "DriversChampionship", "ConstructorsChampionship",
-    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather"
+    "InSeasonProgressDrivers", "InSeasonProgressConstructors", "Nationalities", "RaceReports", "Sessions", "MaxSpeeds", "RaceControlMessages", "WeatherData", "FamilyRelations", "HistoricalWeather", "RedFlags"
 ]
 
 for table in tables:
@@ -873,6 +873,22 @@ cursor.execute('''CREATE TABLE FamilyRelations (
     FOREIGN KEY (DriverID) REFERENCES Drivers(ID),
     FOREIGN KEY (RelatedDriverID) REFERENCES Drivers(ID),
     UNIQUE (DriverID, RelatedDriverID)
+)''')
+
+cursor.execute('''CREATE TABLE RedFlags (
+    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    GrandPrix TEXT,
+    Season INTEGER,
+    Lap INTEGER,
+    RestartedCode TEXT,
+    RestartedDescription TEXT,
+    LeaderAtStoppage TEXT,
+    Reason TEXT,
+    Notes TEXT,
+    GrandPrixID INTEGER,
+    LeaderID INTEGER,
+    FOREIGN KEY (GrandPrixID) REFERENCES GrandsPrix(ID),
+    FOREIGN KEY (LeaderID) REFERENCES Drivers(ID)
 )''')
 
 conn.commit()
