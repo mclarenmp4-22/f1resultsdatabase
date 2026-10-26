@@ -7,6 +7,7 @@ import time
 import re
 import datetime
 import json
+import hashlib
 import sys
 import unicodedata
 from decimal import Decimal
@@ -950,6 +951,366 @@ def save_historical_weather_data(cursor, year, round_number, grandprix_name, gra
             ))
 
         print(f"Historical weather saved for {grandprix_name} {session_name}")
+
+
+# --- Planned schedule ---------------------------------------------------------
+# Snapshots of the planned calendar, kept as versions so that calendar changes
+# during a season (cancellations, postponements, replacements) are not lost.
+# This is deliberately separate from Sessions: Sessions holds sessions that
+# actually ran and that results reference, whereas these are planned sessions.
+
+SCHEDULE_FIRST_SEASON = 2018  # earliest season FastF1's own backend has a full session schedule for
+SCHEDULE_SOURCE = 'fastf1'
+
+
+def get_planned_schedule(year):
+    # backend='fastf1' is forced on purpose. Left on its default, FastF1 silently
+    # falls back to Ergast when its primary source is unreachable, and Ergast has
+    # no session times, so the fallback would be recorded as a (false) change to
+    # the calendar instead of failing loudly.
+    # Testing is excluded: this is the race calendar.
+    schedule = fastf1.get_event_schedule(year, include_testing=False, backend='fastf1')
+
+    events = []
+    for _, row in schedule.iterrows():
+        sessions = []
+        for number in range(1, 6):
+            session_name = row[f'Session{number}']
+            if pd.isna(session_name) or not str(session_name).strip():
+                continue  # this event has fewer than 5 sessions
+
+            start_utc = row[f'Session{number}DateUtc']
+            start_local = row[f'Session{number}Date']
+            if pd.isna(start_utc):
+                # Session is on the calendar but its time is not known (yet).
+                sessions.append({'number': number, 'name': session_name,
+                                 'timestamp_utc': None, 'start_utc': None, 'start_local': None})
+                continue
+
+            start_utc = start_utc.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+            sessions.append({
+                'number': number,
+                'name': session_name,
+                'timestamp_utc': int(start_utc.timestamp()),
+                'start_utc': start_utc.isoformat(),
+                'start_local': None if pd.isna(start_local) else start_local.isoformat(),
+            })
+
+        events.append({
+            'round_number': int(row['RoundNumber']),
+            'event_name': row['EventName'],
+            'official_event_name': row['OfficialEventName'],
+            'country': row['Country'],
+            'location': row['Location'],
+            'event_date': row['EventDate'].strftime('%Y-%m-%d'),  # local date of race day
+            'event_format': row['EventFormat'],
+            'sessions': sessions,
+        })
+
+    # An event is identified across versions by (EventName, Location). A Grand Prix
+    # that keeps its name but changes venue is therefore a different event: the
+    # 2026 Bahrain Grand Prix was cancelled at Sakhir and a Bahrain Grand Prix was
+    # then added at Sepang.
+    keys = [(event['event_name'], event['location']) for event in events]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"The {year} schedule has two events with the same EventName and Location, so they cannot be told apart between versions.")
+
+    return events
+
+
+def hash_schedule_events(events):
+    canonical = json.dumps(
+        sorted(events, key=lambda event: (event['round_number'], event['event_name'])),
+        sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def save_schedule_snapshot(cursor, year):
+    """
+    Saves the season's current planned calendar as a new version, but only if it
+    differs from the latest stored version. Returns True if a version was saved.
+
+    Status of each event in the new version:
+    - 'cancelled': it was in the previous version but is no longer on the calendar.
+      It is carried forward (with its planned sessions) into this and all later
+      versions, with a NULL RoundNumber as it is no longer a round.
+    - 'postponed': it is on the calendar with a later date than in the previous
+      version (this includes a cancelled event that comes back on a later date).
+      Once postponed it stays postponed in later versions.
+    - 'scheduled': everything else, including events added to the calendar.
+    """
+    events = get_planned_schedule(year)
+    content_hash = hash_schedule_events(events)
+
+    cursor.execute("SELECT ID, VersionNumber, ContentHash FROM ScheduleVersions WHERE Season = ? ORDER BY VersionNumber DESC LIMIT 1", (year,))
+    previous = cursor.fetchone()
+    if previous and previous[2] == content_hash:
+        return False
+
+    previous_events = {}
+    if previous:
+        cursor.execute("SELECT ID, EventName, Location, EventDate, Status FROM Schedule WHERE ScheduleVersionID = ?", (previous[0],))
+        for schedule_id, event_name, location, event_date, status in cursor.fetchall():
+            previous_events[(event_name, location)] = (schedule_id, event_date, status)
+
+    version_number = previous[1] + 1 if previous else 1
+    cursor.execute("""
+        INSERT INTO ScheduleVersions (Season, VersionNumber, RetrievedAtUTC, Source, ContentHash)
+        VALUES (?,?,?,?,?)
+    """, (year, version_number, datetime.datetime.now(datetime.timezone.utc).isoformat(), SCHEDULE_SOURCE, content_hash))
+    version_id = cursor.lastrowid
+
+    current_keys = set()
+    for event in events:
+        key = (event['event_name'], event['location'])
+        current_keys.add(key)
+
+        status = 'scheduled'
+        earlier = previous_events.get(key)
+        if earlier and (earlier[2] == 'postponed' or event['event_date'] > earlier[1]):
+            status = 'postponed'
+
+        cursor.execute("""
+            INSERT INTO Schedule (ScheduleVersionID, Season, RoundNumber, EventName, OfficialEventName,
+                                  Country, Location, EventDate, EventFormat, Status)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (version_id, year, event['round_number'], event['event_name'], event['official_event_name'],
+              event['country'], event['location'], event['event_date'], event['event_format'], status))
+        schedule_id = cursor.lastrowid
+
+        for session in event['sessions']:
+            cursor.execute("""
+                INSERT INTO ScheduleSessions (ScheduleID, SessionName, SessionNumber, StartTimeTimestampUTC,
+                                              StartTimeinDatetimeUTC, StartTimeinDatetime)
+                VALUES (?,?,?,?,?,?)
+            """, (schedule_id, session['name'], session['number'], session['timestamp_utc'],
+                  session['start_utc'], session['start_local']))
+
+    for key, (old_schedule_id, _, _) in previous_events.items():
+        if key in current_keys:
+            continue
+        cursor.execute("""
+            INSERT INTO Schedule (ScheduleVersionID, Season, RoundNumber, EventName, OfficialEventName,
+                                  Country, Location, EventDate, EventFormat, Status)
+            SELECT ?, Season, NULL, EventName, OfficialEventName, Country, Location, EventDate, EventFormat, 'cancelled'
+            FROM Schedule WHERE ID = ?
+        """, (version_id, old_schedule_id))
+        cancelled_schedule_id = cursor.lastrowid
+        cursor.execute("""
+            INSERT INTO ScheduleSessions (ScheduleID, SessionName, SessionNumber, StartTimeTimestampUTC,
+                                          StartTimeinDatetimeUTC, StartTimeinDatetime)
+            SELECT ?, SessionName, SessionNumber, StartTimeTimestampUTC, StartTimeinDatetimeUTC, StartTimeinDatetime
+            FROM ScheduleSessions WHERE ScheduleID = ?
+        """, (cancelled_schedule_id, old_schedule_id))
+
+    return True
+
+
+def link_schedule_to_grandsprix(cursor):
+    # Links an event to the Grand Prix held on its date, allowing one day of difference.
+    # EventDate is the local date, and a race run in the evening can already be on the
+    # next day in UTC: the Las Vegas Grand Prix is raced on Saturday night local time.
+    # Race weekends are at least a week apart, so this cannot match the wrong race.
+    # Events that have not been held (yet), and cancelled events, are left NULL;
+    # nothing else is guessed.
+    # Two passes, exact date first, so that an exact match always wins.
+    cursor.execute("""
+        UPDATE Schedule
+        SET GrandPrixID = (
+            SELECT GrandsPrix.ID FROM GrandsPrix
+            WHERE GrandsPrix.Season = Schedule.Season AND GrandsPrix.DateInDateTime = Schedule.EventDate
+        )
+        WHERE GrandPrixID IS NULL AND Status != 'cancelled'
+    """)
+    cursor.execute("""
+        UPDATE Schedule
+        SET GrandPrixID = (
+            SELECT GrandsPrix.ID FROM GrandsPrix
+            WHERE GrandsPrix.Season = Schedule.Season
+              AND ABS(julianday(GrandsPrix.DateInDateTime) - julianday(Schedule.EventDate)) <= 1
+            ORDER BY GrandsPrix.ID
+            LIMIT 1
+        )
+        WHERE GrandPrixID IS NULL AND Status != 'cancelled'
+    """)
+
+
+def update_schedules(cursor):
+    current_year = datetime.datetime.now().year
+    for year in range(SCHEDULE_FIRST_SEASON, current_year + 1):
+        cursor.execute("SELECT 1 FROM ScheduleVersions WHERE Season = ? LIMIT 1", (year,))
+        has_version = cursor.fetchone() is not None
+        # A finished season's calendar can no longer change, so it is only snapshotted
+        # once. The current season is checked on every run.
+        if has_version and year != current_year:
+            continue
+        if save_schedule_snapshot(cursor, year):
+            print(f"Schedule snapshot saved for {year}")
+    link_schedule_to_grandsprix(cursor)
+
+
+# --- Circuit markers ----------------------------------------------------------
+# Positions of corners, marshal lights and marshal sectors, and the rotation of each circuit's
+# coordinate system, from MultiViewer (the data FastF1 exposes as CircuitInfo). It is drawn by
+# hand, so it is good for annotating maps but not precise.
+
+MULTIVIEWER_API_URL = 'https://api.multiviewer.app/api/v1/circuits'
+MULTIVIEWER_FIRST_SEASON = 2018  # MultiViewer has no records for earlier seasons
+
+# Circuits.ID -> MultiViewer circuit key. A circuit without an entry has no MultiViewer data
+# (yet): Circuito de Madring, for example. A layout can belong to more than one circuit (the
+# Red Bull Ring layout was the A1-Ring's), so a layout uses the entry of the circuit it was
+# raced as most recently.
+MULTIVIEWER_CIRCUIT_KEYS = {
+    1030: 147,  # Algarve International Circuit
+    454: 6,     # Imola
+    1027: 146,  # Mugello (marshal sectors only)
+    7: 39,      # Monza
+    435: 65,    # Mexico City
+    486: 14,    # Interlagos
+    716: 63,    # Bahrain
+    943: 144,   # Baku
+    327: 23,    # Montreal
+    22: 55,     # Zandvoort
+    202: 28,    # Paul Ricard
+    514: 15,    # Barcelona-Catalunya
+    2: 22,      # Monaco
+    5: 7,       # Spa-Francorchamps
+    877: 9,     # Austin
+    192: 34,    # Hockenheim
+    431: 4,     # Hungaroring
+    1032: 59,   # Istanbul
+    1075: 149,  # Jeddah
+    1139: 152,  # Las Vegas
+    1074: 150,  # Lusail
+    800: 61,    # Marina Bay
+    582: 10,    # Melbourne
+    1081: 151,  # Miami
+    13: 72,     # Nurburgring
+    905: 19,    # Red Bull Ring
+    729: 49,    # Shanghai
+    1: 2,       # Silverstone
+    913: 79,    # Sochi
+    451: 46,    # Suzuka
+    820: 70,    # Yas Marina
+}
+
+# A layout that is a different MultiViewer circuit from the rest of its circuit, keyed by
+# CircuitLayouts.FirstGrandPrix. The 2020 Sakhir Grand Prix was raced on Bahrain's outer track,
+# which MultiViewer lists separately (and without any markers).
+MULTIVIEWER_LAYOUT_KEY_OVERRIDES = {'2020 Sakhir Grand Prix': 148}
+
+MULTIVIEWER_MARKER_TYPES = (('corners', 'corner'), ('marshalLights', 'marshal_light'), ('marshalSectors', 'marshal_sector'))
+
+
+def get_multiviewer_json(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+def get_multiviewer_markers(key, year):
+    """One MultiViewer record as (marker rows, rotation). Each marker row is
+    (type, number, letter, x, y, angle)."""
+    record = get_multiviewer_json(f"{MULTIVIEWER_API_URL}/{key}/{year}")
+    # For a year it has no record for, MultiViewer silently answers with its nearest record.
+    # The circuit list says which years exist, so this should never differ, but data from
+    # another season must not be stored by accident.
+    if record['circuitKey'] != key or record['year'] != year:
+        raise ValueError(f"Asked MultiViewer for circuit {key} in {year}, but got circuit {record['circuitKey']} in {record['year']}")
+
+    markers = []
+    for field, marker_type in MULTIVIEWER_MARKER_TYPES:
+        for entry in record.get(field) or []:
+            angle = entry.get('angle')
+            markers.append((marker_type, int(entry['number']), str(entry.get('letter') or ''),
+                            float(entry['trackPosition']['x']), float(entry['trackPosition']['y']),
+                            None if angle is None else float(angle)))
+    rotation = record.get('rotation')
+    return markers, None if rotation is None else float(rotation)
+
+
+def update_circuit_markers(cursor):
+    listing = get_multiviewer_json(MULTIVIEWER_API_URL)
+
+    cursor.execute("""
+        SELECT cl.ID, cl.FirstGrandPrix, MIN(g.Season), MAX(g.Season), cl.MarkersSourceYear
+        FROM GrandsPrix g
+        JOIN CircuitLayouts cl ON g.CircuitLayoutID = cl.ID
+        GROUP BY cl.ID
+        HAVING MAX(g.Season) >= ?
+    """, (MULTIVIEWER_FIRST_SEASON,))
+
+    circuits = {}  # MultiViewer circuit key -> the layouts of it that MultiViewer has a record for
+    for layout_id, first_grandprix, first_season, last_season, stored_year in cursor.fetchall():
+        cursor.execute("""
+            SELECT g.CircuitID, c.CircuitName
+            FROM GrandsPrix g
+            JOIN Circuits c ON g.CircuitID = c.ID
+            WHERE g.CircuitLayoutID = ?
+            GROUP BY g.CircuitID
+            ORDER BY MAX(g.Season) DESC
+        """, (layout_id,))
+        layout_circuits = cursor.fetchall()
+        circuit_name = layout_circuits[0][1]
+
+        key = MULTIVIEWER_LAYOUT_KEY_OVERRIDES.get(first_grandprix)
+        if key is None:
+            key = next((MULTIVIEWER_CIRCUIT_KEYS[circuit_id] for circuit_id, _ in layout_circuits if circuit_id in MULTIVIEWER_CIRCUIT_KEYS), None)
+        if key is None:
+            print(f"No MultiViewer circuit for {circuit_name}, no markers saved")
+            continue
+        if str(key) not in listing:
+            raise ValueError(f"MultiViewer has no circuit {key}, which is the one set for {circuit_name}")
+
+        # The latest record from a season this layout was raced in. MultiViewer's records
+        # are per race, so this is the most recent race held on the layout that it has.
+        years = [year for year in listing[str(key)]['years'] if first_season <= year <= last_season]
+        if not years:
+            continue
+        circuits.setdefault(key, []).append({
+            'layout_id': layout_id, 'circuit_name': circuit_name, 'key': key, 'record_year': max(years),
+            'first_season': first_season, 'last_season': last_season, 'stored_year': stored_year,
+        })
+
+    saved = 0
+    for layouts in circuits.values():
+        if all(layout['stored_year'] == layout['record_year'] for layout in layouts):
+            continue  # nothing new from MultiViewer since the last run
+        for layout in layouts:
+            layout['markers'], layout['rotation'] = get_multiviewer_markers(layout['key'], layout['record_year'])
+            time.sleep(0.25)
+
+        # MultiViewer can copy a circuit's newest markers onto its records for older seasons:
+        # its 2019 Australian Grand Prix record has exactly the markers of the 2022 one, though
+        # the circuit was redesigned in between. Two layouts of the same circuit cannot both
+        # have identical markers, so only the layout raced most recently keeps them.
+        same_markers = {}
+        for layout in layouts:
+            if layout['markers']:
+                geometry = tuple((marker[0], marker[1], marker[2], round(marker[3]), round(marker[4])) for marker in layout['markers'])
+                same_markers.setdefault(geometry, []).append(layout)
+        keep = {max(group, key=lambda layout: (layout['last_season'], layout['first_season']))['layout_id'] for group in same_markers.values()}
+
+        for layout in layouts:
+            cursor.execute("DELETE FROM CircuitMarkers WHERE CircuitLayoutID = ?", (layout['layout_id'],))
+            rotation = None
+            if layout['layout_id'] in keep:
+                cursor.executemany("""
+                    INSERT INTO CircuitMarkers (CircuitLayoutID, MarkerType, Number, Letter, X, Y, Angle)
+                    VALUES (?,?,?,?,?,?,?)
+                """, [(layout['layout_id'], *marker) for marker in layout['markers']])
+                rotation = layout['rotation']
+                saved += 1
+            elif layout['markers']:
+                print(f"No markers saved for {layout['circuit_name']} layout {layout['layout_id']}: MultiViewer gives it the same markers as a later layout")
+            else:
+                print(f"No markers saved for {layout['circuit_name']} layout {layout['layout_id']}: MultiViewer has none for it")
+            # The year is stored even when nothing was saved, so that this layout is not fetched again.
+            cursor.execute("UPDATE CircuitLayouts SET Rotation = ?, MarkersSourceYear = ? WHERE ID = ?",
+                           (rotation, layout['record_year'], layout['layout_id']))
+    if saved:
+        print(f"Circuit markers saved for {saved} layouts")
 
 
 #This function gets the birthdate and nationality of a driver from their statsf1.com page. 
@@ -6339,6 +6700,14 @@ for table in tables_to_reset:
 
 conn.commit()
 print("All stats successfully updated and flags reset.")
+
+update_schedules(cur)
+conn.commit()
+print("Schedule updated.")
+
+update_circuit_markers(cur)
+conn.commit()
+print("Circuit markers updated.")
 
 print("Running database optimization (this may take a moment)...")
 cur.execute("VACUUM")
