@@ -1,23 +1,32 @@
 """
 Telemetry scraper (issue #4).
 
-Downloads per-lap car telemetry from TracingInsights (via the jsDelivr CDN, the
-same way writedb.py already fetches their lap data) and stores one zstd-compressed
-Parquet file per driver per session:
+Stores car telemetry as one zstd-compressed Parquet file per driver per session:
 
     telemetry/<season>/<GrandPrixID>/<SessionID>/<DriverID>.parquet
 
-Each file is indexed by one row in the TelemetryIndex table.
+Each file is indexed by one row in the TelemetryIndex table. Two sources produce
+exactly the same columns:
 
-Called from writedb.py for every new Grand Prix, and from
-updaters/update_telemetry.py to backfill or catch up. It can also be run on its
-own to write Parquet files without a database:
+  * FastF1 (3.9 or later), if you are signed in to an F1 TV account. Sign in once with
+        python -m fastf1 auth f1tv --authenticate
+    or set the F1_USERNAME and F1_PASSWORD environment variables. The scraper never
+    asks for credentials by itself.
+  * TracingInsights (https://github.com/TracingInsights), a free copy of the same data
+    under the Apache-2.0 licence, used when FastF1 is not set up or cannot load a session.
 
-    python -m scrapers.telemetry_scraper --year 2026 --event "Australian Grand Prix" --session Race --drivers VER
+F1_TELEMETRY_SOURCE=auto|fastf1|tracinginsights overrides the choice (default auto).
+
+Called from writedb.py for every new Grand Prix, and from updaters/update_telemetry.py
+to backfill or catch up. It can also be run on its own to write Parquet files from
+TracingInsights without a database:
+
+    python scrapers/telemetry_scraper.py --year 2026 --event "Australian Grand Prix" --session Race --drivers VER
 """
 import argparse
 import datetime
 import json
+import os
 import random
 import re
 import time
@@ -32,7 +41,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-SOURCE = "TracingInsights"
+SOURCE_FASTF1 = "FastF1"
+SOURCE_TRACINGINSIGHTS = "TracingInsights"
+SOURCE_CHOICES = ("auto", "fastf1", "tracinginsights")
+
 # Tried in order. jsDelivr is the CDN writedb.py already uses; it caches @main for
 # hours and can refuse individual files, so GitHub itself is the fallback.
 BASE_URLS = (
@@ -40,7 +52,7 @@ BASE_URLS = (
     "https://raw.githubusercontent.com/TracingInsights/{year}/main/{path}",
 )
 TELEMETRY_DIR = Path("telemetry")
-FIRST_SEASON = 2018  # TracingInsights coverage starts here
+FIRST_SEASON = 2018  # both sources start here
 MAX_WORKERS = 4
 PAUSE_RANGE = (0.05, 0.15)  # seconds; random pause before every request
 RETRIES = 3
@@ -53,29 +65,25 @@ TELEMETRY_SESSIONS = (
     "Sprint Shootout", "Sprint Qualifying", "Sprint", "Race",
 )
 
-# source column -> (output column, dtype)
-CORE_COLUMNS = {
-    "speed": ("speed", "float32"),
-    "rpm": ("rpm", "float32"),
-    "throttle": ("throttle", "float32"),  # 104 is FastF1's sensor-error value; kept as published
-    "gear": ("gear", "int8"),
-    "brake": ("brake", "bool"),
-    "drs": ("drs", "uint8"),  # always 0 from 2026 (active aero); on/off only in earlier years
-    "distance": ("distance", "float32"),
-    "x": ("x", "float32"),
-    "y": ("y", "float32"),
-    "z": ("z", "float32"),
+# Parquet columns besides `lap` (uint8) and `time_ms` (int32, since the lap started).
+# The names are TracingInsights' own; FASTF1_COLUMNS maps FastF1's names onto them.
+COLUMNS = {
+    "speed": "float32",
+    "rpm": "float32",
+    "throttle": "float32",  # 104 is FastF1's sensor-error value; kept as published
+    "gear": "int8",
+    "brake": "bool",
+    "drs": "uint8",  # 1 = open; always 0 from 2026 in the TracingInsights data
+    "distance": "float32",
+    "x": "float32",
+    "y": "float32",
+    "z": "float32",
 }
-# Computed upstream rather than measured. Roughly doubles file size.
-EXTRA_COLUMNS = {
-    "rel_distance": ("rel_distance", "float32"),
-    "acc_x": ("acc_x", "float32"),
-    "acc_y": ("acc_y", "float32"),
-    "acc_z": ("acc_z", "float32"),
-    "DriverAhead": ("driver_ahead", "UInt8"),
-    "DistanceToDriverAhead": ("dist_ahead", "float32"),
+FASTF1_COLUMNS = {
+    "Speed": "speed", "RPM": "rpm", "Throttle": "throttle", "nGear": "gear",
+    "Brake": "brake", "Distance": "distance", "X": "x", "Y": "y", "Z": "z",
 }
-INCLUDE_EXTRA_COLUMNS = False
+FASTF1_DRS_OPEN = (10, 12, 14)  # FastF1's raw DRS codes for "open"; everything else is closed
 
 
 def normalize_driver_name(name):
@@ -94,10 +102,12 @@ def _letters(text):
 
 
 def resolve_driver(entry, drivers, grandprix_drivers):
-    """Map one TracingInsights drivers.json entry to a (DriverID, Name) row.
+    """Map one driver entry to a (DriverID, Name) row. The entry is a dict with
+    'driver' (three-letter code) and optionally 'fn' / 'ln' (first and last name),
+    which is what both TracingInsights' drivers.json and FastF1's results provide.
 
-    1. If the entry has a usable first and last name (most entries from 2019),
-       match it against the whole Drivers table.
+    1. If the entry has a usable first and last name, match it against the whole
+       Drivers table.
     2. Otherwise, or if the name is spelled differently from ours, use the
        three-letter code (e.g. 'HUL'), which is the start of the surname: look
        for exactly one driver in this Grand Prix whose surname starts with it.
@@ -122,11 +132,131 @@ def resolve_driver(entry, drivers, grandprix_drivers):
     matches = surname_matches or word_matches
     if len(matches) != 1:
         raise ValueError(
-            f"Could not match TracingInsights driver {entry['driver']} (name: {first} {last}) "
+            f"Could not match driver {entry['driver']} (name: {first} {last}) "
             f"to exactly one driver in this Grand Prix; candidates: {matches}"
         )
     return matches[0]
 
+
+def finish_frame(df):
+    """Cast a frame that already uses our column names to the Parquet schema."""
+    for column, dtype in COLUMNS.items():
+        if dtype in ("bool", "int8", "uint8") and df[column].isna().any():
+            raise ValueError(f"unexpected missing values in integer column '{column}'")
+        df[column] = df[column].astype(dtype)
+    df["lap"] = df["lap"].astype("uint8")
+    df["time_ms"] = df["time_ms"].astype("int32")
+    return df.sort_values(["lap", "time_ms"], kind="stable").reset_index(drop=True)[["lap", "time_ms", *COLUMNS]]
+
+
+def write_parquet(df, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    floats = [field.name for field in table.schema if pa.types.is_floating(field.type)]
+    # byte-stream-split on the float columns shrinks the files by ~40%; it needs
+    # dictionary encoding switched off.
+    pq.write_table(table, path, compression="zstd", compression_level=ZSTD_LEVEL,
+                   use_dictionary=False, use_byte_stream_split=floats)
+
+
+# ---------------------------------------------------------------------------
+# Source 1: FastF1
+# ---------------------------------------------------------------------------
+
+def fastf1_session_name(session_name, year):
+    """FastF1 calls the 2021 and 2022 sprints 'Sprint'; our Sessions table calls them 'Sprint Qualifying'."""
+    if session_name == "Sprint Qualifying" and year in (2021, 2022):
+        return "Sprint"
+    return session_name
+
+
+def fastf1_ready():
+    """True if FastF1 can send an F1 TV token without asking anybody for anything:
+    FastF1 3.9 or later, with either a valid stored token (python -m fastf1 auth f1tv
+    --authenticate) or F1_USERNAME and F1_PASSWORD set. Nothing is downloaded or signed in here."""
+    try:
+        import fastf1
+        from fastf1.internals.f1account import token_manager
+    except ImportError:
+        return False
+    if not hasattr(fastf1, "set_auth_method"):
+        return False  # FastF1 older than 3.9 cannot sign in
+    token = token_manager.get_stored()
+    if token is not None and token.is_valid():
+        return True
+    return bool(os.environ.get("F1_USERNAME") and os.environ.get("F1_PASSWORD"))
+
+
+def load_fastf1_session(year, round_number, session_name):
+    import fastf1
+    # A loaded session is hundreds of MB; do not leave it in FastF1's disk cache.
+    with fastf1.Cache.disabled():
+        session = fastf1.get_session(year, round_number, fastf1_session_name(session_name, year))
+        session.load(laps=True, telemetry=True, weather=False, messages=False)
+    return session
+
+
+def _fastf1_lap_frame(lap):
+    """One lap's merged car + position telemetry in our column names. This is
+    Lap.get_telemetry() without its slow driver-ahead calculation, which we do not store."""
+    pos_data = lap.get_pos_data(pad=1, pad_side="both")
+    car_data = lap.get_car_data(pad=1, pad_side="both").add_distance()
+    tel = pos_data.merge_channels(car_data).slice_by_lap(lap, interpolate_edges=True)
+    if len(tel) == 0:
+        return None
+    frame = pd.DataFrame({
+        "lap": int(lap["LapNumber"]),
+        "time_ms": (tel["Time"].dt.total_seconds() * 1000).round().to_numpy(),
+    })
+    for source, name in FASTF1_COLUMNS.items():
+        frame[name] = tel[source].to_numpy()
+    frame["drs"] = tel["DRS"].isin(FASTF1_DRS_OPEN).astype("uint8").to_numpy()
+    return frame
+
+
+def fastf1_driver_frames(session):
+    """Yield (entry, DataFrame, missing_laps) for each driver of a loaded FastF1
+    session. The DataFrame is None if the driver has no telemetry."""
+    for _, driver in session.results.iterrows():
+        frames, missing = [], 0
+        for _, lap in session.laps.pick_drivers(driver["DriverNumber"]).iterlaps():
+            if pd.isna(lap["LapNumber"]) or pd.isna(lap["LapStartTime"]) or pd.isna(lap["Time"]):
+                missing += 1
+                continue
+            frame = _fastf1_lap_frame(lap)
+            if frame is None:
+                missing += 1
+            else:
+                frames.append(frame)
+        entry = {"driver": driver["Abbreviation"], "fn": driver["FirstName"], "ln": driver["LastName"]}
+        if not frames:
+            yield entry, None, missing
+            continue
+        df = pd.concat(frames, ignore_index=True)
+        # keep the last known gear / brake / DRS across the interpolated edge samples
+        for column in ("gear", "brake", "drs"):
+            df[column] = df.groupby("lap")[column].transform(lambda values: values.ffill().bfill())
+        yield entry, finish_frame(df), missing
+
+
+def _fastf1_results(year, round_number, grandprix_name, session_name, strict):
+    """Load a session through FastF1 and convert every driver. Returns a list of
+    (entry, DataFrame, missing_laps), or None if FastF1 could not provide the
+    session and we are allowed to fall back to TracingInsights."""
+    from fastf1.exceptions import DataNotLoadedError, F1AuthError, NoLapDataError
+    try:
+        session = load_fastf1_session(year, round_number, session_name)
+        return list(fastf1_driver_frames(session))
+    except (DataNotLoadedError, F1AuthError, NoLapDataError, ValueError) as error:
+        if strict:
+            raise
+        print(f"FastF1 could not load {grandprix_name} {session_name} ({error}); trying TracingInsights")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Source 2: TracingInsights
+# ---------------------------------------------------------------------------
 
 def event_folder(grandprix_name, year):
     """TracingInsights folder for a Grand Prix: the name without the year, with
@@ -200,22 +330,22 @@ def fetch_json(year, path, base_urls=BASE_URLS):
     raise RuntimeError("Could not download " + path + ":\n  " + "\n  ".join(errors))
 
 
-def _lap_frame(year, base, lap, columns, base_urls):
+def _lap_frame(year, base, lap, base_urls):
     data = fetch_json(year, f"{base}/{lap}_tel.json", base_urls)
     if data is None:
         return None
     tel = data["tel"]
-    absent = [source for source in columns if source not in tel]
+    absent = [name for name in COLUMNS if name not in tel]
     if absent:
         raise ValueError(f"{base}/{lap}_tel.json is missing columns {absent}")
-    frame = pd.DataFrame({source: tel[source] for source in columns})
+    frame = pd.DataFrame({name: tel[name] for name in COLUMNS})
     frame.insert(0, "time_ms", (pd.Series(tel["time"]) * 1000).round())
     frame.insert(0, "lap", lap)
     return frame
 
 
-def driver_frame(year, event, folder, code, columns, base_urls=BASE_URLS):
-    """All laps of one driver in one session as a single DataFrame.
+def driver_frame(year, event, folder, code, base_urls=BASE_URLS):
+    """All laps of one driver in one TracingInsights session as a single DataFrame.
     Returns (frame, missing_lap_files); frame is None if the driver has no data."""
     base = f"{event}/{folder}/{code}"
     laptimes = fetch_json(year, f"{base}/laptimes.json", base_urls)
@@ -223,7 +353,7 @@ def driver_frame(year, event, folder, code, columns, base_urls=BASE_URLS):
         return None, 0
     laps = laptimes["lap"]
     with ThreadPoolExecutor(MAX_WORKERS) as pool:
-        results = list(pool.map(lambda lap: _lap_frame(year, base, lap, columns, base_urls), laps))
+        results = list(pool.map(lambda lap: _lap_frame(year, base, lap, base_urls), laps))
     missing = sum(1 for result in results if result is None)
     frames = [result for result in results if result is not None and len(result)]
     if not frames:
@@ -231,51 +361,107 @@ def driver_frame(year, event, folder, code, columns, base_urls=BASE_URLS):
 
     df = pd.concat(frames, ignore_index=True)
     # TracingInsights writes the string 'None' for missing values in some columns
-    for source in columns:
-        df[source] = pd.to_numeric(df[source], errors="coerce")
-    df = df.rename(columns={source: output for source, (output, _) in columns.items()})
-    for output, dtype in columns.values():
-        if dtype in ("bool", "int8", "uint8") and df[output].isna().any():
-            raise ValueError(f"{base}: unexpected missing values in integer column '{output}'")
-        df[output] = df[output].astype(dtype)
-    df["lap"] = df["lap"].astype("uint8")
-    df["time_ms"] = df["time_ms"].astype("int32")
-    return df.sort_values(["lap", "time_ms"], kind="stable").reset_index(drop=True), missing
+    for name in COLUMNS:
+        df[name] = pd.to_numeric(df[name], errors="coerce")
+    try:
+        return finish_frame(df), missing
+    except ValueError as error:
+        raise ValueError(f"{base}: {error}") from error
 
 
-def write_parquet(df, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    floats = [field.name for field in table.schema if pa.types.is_floating(field.type)]
-    # byte-stream-split on the float columns shrinks the files by ~40%; it needs
-    # dictionary encoding switched off.
-    pq.write_table(table, path, compression="zstd", compression_level=ZSTD_LEVEL,
-                   use_dictionary=False, use_byte_stream_split=floats)
+# ---------------------------------------------------------------------------
+# Saving
+# ---------------------------------------------------------------------------
+
+def _store(cursor, df, path, source, grandprix_name, session_name, driver_name, grandprix_id, session_id, driver_id):
+    write_parquet(df, path)
+    cursor.execute("""
+        INSERT OR REPLACE INTO TelemetryIndex (
+            GrandPrixName, SessionName, Driver, FilePath, RowCount, LapCount,
+            Source, RetrievedAtUTC, GrandPrixID, SessionID, DriverID
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        grandprix_name, session_name, driver_name, path.as_posix(), len(df),
+        int(df["lap"].nunique()), source,
+        datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        grandprix_id, session_id, driver_id,
+    ))
 
 
-def selected_columns():
-    return {**CORE_COLUMNS, **EXTRA_COLUMNS} if INCLUDE_EXTRA_COLUMNS else dict(CORE_COLUMNS)
+_announced = False
 
 
-def save_telemetry(cursor, year, grandprix_name, grandprix_id, out_root=TELEMETRY_DIR, base_urls=BASE_URLS):
-    """Download and index telemetry for every session of one Grand Prix that
-    does not have it yet. Safe to re-run. Returns the number of files written.
-    Sessions TracingInsights has not published yet are skipped and picked up by
+def _announce_tracinginsights():
+    global _announced
+    if not _announced:
+        _announced = True
+        print("Telemetry source: TracingInsights. To use FastF1 instead, sign in to F1 TV once with "
+              "`python -m fastf1 auth f1tv --authenticate` (FastF1 3.9 or later).")
+
+
+def save_telemetry(cursor, year, grandprix_name, grandprix_id, out_root=TELEMETRY_DIR,
+                   base_urls=BASE_URLS, source=None):
+    """Download and index telemetry for every session of one Grand Prix that does
+    not have it yet. Safe to re-run. Returns the number of files written.
+
+    `source` (default: the F1_TELEMETRY_SOURCE environment variable, else 'auto'):
+      'auto'            FastF1 when it is set up, for sessions with nothing indexed yet;
+                        TracingInsights for everything else, including when FastF1 fails.
+      'fastf1'          FastF1 only; raises if it is not set up or cannot load a session.
+      'tracinginsights' TracingInsights only.
+    Sessions that no source has published yet are skipped and picked up by
     updaters/update_telemetry.py later."""
+    source = (source or os.environ.get("F1_TELEMETRY_SOURCE", "auto")).strip().lower()
+    if source not in SOURCE_CHOICES:
+        raise ValueError(f"F1_TELEMETRY_SOURCE must be one of {SOURCE_CHOICES}, not '{source}'")
     if year < FIRST_SEASON:
         return 0
+    use_fastf1 = source != "tracinginsights"
+    if source == "fastf1" and not fastf1_ready():
+        raise RuntimeError(
+            "FastF1 telemetry needs FastF1 3.9 or later and an F1 TV sign-in. Run "
+            "`python -m fastf1 auth f1tv --authenticate` once, or set F1_USERNAME and F1_PASSWORD."
+        )
+    if source == "auto":
+        use_fastf1 = fastf1_ready()
+        if not use_fastf1:
+            _announce_tracinginsights()
 
     cursor.execute("SELECT ID, Name FROM Drivers")
     drivers = {normalize_driver_name(name): (driver_id, name) for driver_id, name in cursor.fetchall()}
     cursor.execute("SELECT DISTINCT driverid, driver FROM GrandPrixResults WHERE grandprixid = ?", (grandprix_id,))
     grandprix_drivers = cursor.fetchall()
+    cursor.execute("SELECT RoundNumber FROM GrandsPrix WHERE ID = ?", (grandprix_id,))
+    round_number = cursor.fetchone()[0]
     cursor.execute("SELECT ID, SessionName FROM Sessions WHERE GrandPrixID = ? ORDER BY SessionNumber", (grandprix_id,))
     sessions = [(session_id, name) for session_id, name in cursor.fetchall() if name in TELEMETRY_SESSIONS]
 
     event = event_folder(grandprix_name, year)
-    columns = selected_columns()
     written = 0
     for session_id, session_name in sessions:
+        cursor.execute("SELECT COUNT(*) FROM TelemetryIndex WHERE SessionID = ?", (session_id,))
+        already_indexed = cursor.fetchone()[0]
+
+        # FastF1 loads a whole session in one go, so it is only used for sessions with
+        # nothing indexed yet; a partly finished session is completed from TracingInsights.
+        if use_fastf1 and already_indexed == 0:
+            results = _fastf1_results(year, round_number, grandprix_name, session_name, strict=source == "fastf1")
+            if results is not None:
+                for entry, df, missing in results:
+                    if df is None:
+                        continue
+                    driver_id, driver_name = resolve_driver(entry, drivers, grandprix_drivers)
+                    path = Path(out_root) / str(year) / str(grandprix_id) / str(session_id) / f"{driver_id}.parquet"
+                    _store(cursor, df, path, SOURCE_FASTF1, grandprix_name, session_name, driver_name,
+                           grandprix_id, session_id, driver_id)
+                    written += 1
+                    note = f" ({missing} laps without telemetry)" if missing else ""
+                    print(f"Telemetry saved for {grandprix_name} {session_name} {driver_name} [FastF1]{note}")
+                continue
+        if source == "fastf1":
+            continue
+
         folder = session_folder(session_name, year)
         meta = fetch_json(year, f"{event}/{folder}/drivers.json", base_urls)
         if meta is None:
@@ -290,22 +476,11 @@ def save_telemetry(cursor, year, grandprix_name, grandprix_id, out_root=TELEMETR
             if cursor.fetchone() and path.exists():
                 continue
 
-            df, missing = driver_frame(year, event, folder, entry["driver"], columns, base_urls)
+            df, missing = driver_frame(year, event, folder, entry["driver"], base_urls)
             if df is None:
                 continue
-            write_parquet(df, path)
-            cursor.execute("""
-                INSERT OR REPLACE INTO TelemetryIndex (
-                    GrandPrixName, SessionName, Driver, FilePath, RowCount, LapCount,
-                    Source, RetrievedAtUTC, GrandPrixID, SessionID, DriverID
-                )
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                grandprix_name, session_name, driver_name, path.as_posix(), len(df),
-                int(df["lap"].nunique()), SOURCE,
-                datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                grandprix_id, session_id, driver_id,
-            ))
+            _store(cursor, df, path, SOURCE_TRACINGINSIGHTS, grandprix_name, session_name, driver_name,
+                   grandprix_id, session_id, driver_id)
             written += 1
             note = f" ({missing} lap files missing upstream)" if missing else ""
             print(f"Telemetry saved for {grandprix_name} {session_name} {driver_name}{note}")
@@ -313,13 +488,14 @@ def save_telemetry(cursor, year, grandprix_name, grandprix_id, out_root=TELEMETR
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Write telemetry Parquet files without touching the database.")
+    parser = argparse.ArgumentParser(description="Write TracingInsights telemetry Parquet files without touching the database.")
     parser.add_argument("--year", type=int, required=True)
     parser.add_argument("--event", required=True, help='e.g. "Australian Grand Prix"')
     parser.add_argument("--session", required=True, help='e.g. "Race", "Qualifying", "Practice 1"')
     parser.add_argument("--drivers", nargs="*", help="three-letter codes; default is every driver in the session")
     parser.add_argument("--out", default=str(TELEMETRY_DIR))
-    parser.add_argument("--base-url", dest="base_urls", nargs="+", default=BASE_URLS, help="URL templates with {year} and {path}, tried in order")
+    parser.add_argument("--base-url", dest="base_urls", nargs="+", default=BASE_URLS,
+                        help="URL templates with {year} and {path}, tried in order")
     args = parser.parse_args()
 
     folder = session_folder(args.session, args.year)
@@ -330,9 +506,8 @@ def main():
             raise SystemExit(f"No telemetry published for {args.event} {folder}")
         codes = [entry["driver"] for entry in meta["drivers"]]
 
-    columns = selected_columns()
     for code in codes:
-        df, missing = driver_frame(args.year, args.event, folder, code, columns, args.base_urls)
+        df, missing = driver_frame(args.year, args.event, folder, code, args.base_urls)
         if df is None:
             print(f"{code}: no data")
             continue

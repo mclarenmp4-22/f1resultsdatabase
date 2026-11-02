@@ -161,6 +161,12 @@ Car telemetry (see `TelemetryIndex`) is downloaded automatically for every new r
 python writedb.py --notelemetry
 ```
 
+Telemetry comes from [TracingInsights](https://tracinginsights.com/) by default. If you have an F1 TV subscription you can use FastF1 instead (FastF1 3.9 or later). Sign in once:
+```bash
+python -m fastf1 auth f1tv --authenticate
+```
+After that FastF1 is used automatically for sessions that have no telemetry yet, and TracingInsights is used if FastF1 cannot load a session. Credentials are never requested during a run; you can also set `F1_USERNAME` and `F1_PASSWORD`. Set `F1_TELEMETRY_SOURCE` to `fastf1` or `tracinginsights` to force one source. Both produce the same files.
+
 To download telemetry for races that are already in the database, or for sessions that TracingInsights had not published yet when you ran `writedb.py`:
 ```bash
 python updaters/update_telemetry.py 2026
@@ -1453,7 +1459,7 @@ MultiViewer only has records for seasons since 2018, so only layouts raced since
     - **LeaderID**: Foreign key to Drivers. _INTEGER_
 
 32. ### TelemetryIndex:
-This table indexes the car telemetry files in the `telemetry/` folder, one row per driver per session, from 2018 onwards. The telemetry itself is not stored in the SQLite database: it is hundreds of thousands of samples per race, so each driver's laps in a session are kept in one zstd-compressed [Parquet](https://parquet.apache.org/) file and this table says where to find it. The data comes from [TracingInsights](https://tracinginsights.com/), which processes the F1 live timing feed with FastF1, and is available a short while after each session.
+This table indexes the car telemetry files in the `telemetry/` folder, one row per driver per session, from 2018 onwards. The telemetry itself is not stored in the SQLite database: it is hundreds of thousands of samples per race, so each driver's laps in a session are kept in one zstd-compressed [Parquet](https://parquet.apache.org/) file and this table says where to find it. The data comes from [FastF1](https://github.com/theOehrly/Fast-F1) when you are signed in to F1 TV, and otherwise from [TracingInsights](https://tracinginsights.com/), which processes the same F1 live timing feed with FastF1. Both produce identical files. It is available a short while after each session.
 
 Files are laid out as `telemetry/<Season>/<GrandPrixID>/<SessionID>/<DriverID>.parquet`, and can be read with any Parquet library, for example `pandas.read_parquet(path)`.
 
@@ -1466,7 +1472,7 @@ Files are laid out as `telemetry/<Season>/<GrandPrixID>/<SessionID>/<DriverID>.p
 - **FilePath**: Path of the Parquet file, relative to the repository root. _TEXT_
 - **RowCount**: Number of samples in the file. _INTEGER_
 - **LapCount**: Number of laps in the file. _INTEGER_
-- **Source**: Where the telemetry was downloaded from (`TracingInsights`). _TEXT_
+- **Source**: Where the telemetry was downloaded from, `FastF1` or `TracingInsights`. _TEXT_
 - **RetrievedAtUTC**: When the file was downloaded, as an ISO 8601 UTC timestamp. _TEXT_
 - **GrandPrixID**: Foreign key to GrandsPrix. _INTEGER_
 - **SessionID**: Foreign key to Sessions. _INTEGER_
@@ -1481,11 +1487,11 @@ Files are laid out as `telemetry/<Season>/<GrandPrixID>/<SessionID>/<DriverID>.p
 - **throttle**: Throttle pedal position in percent. Values of 104 occasionally appear in the source data and are not valid pedal positions. _float32_
 - **gear**: Gear selected. _int8_
 - **brake**: Whether the brake is applied. _bool_
-- **drs**: DRS state, 0 when closed. This is always 0 from 2026, when DRS was replaced by active aerodynamics, which is not recorded. _uint8_
+- **drs**: 1 when DRS is open, otherwise 0. DRS was replaced by active aerodynamics in 2026, which is not recorded; in the TracingInsights data for 2026 this is always 0. _uint8_
 - **distance**: Distance driven since the start of the lap in metres. _float32_
 - **x**, **y**, **z**: Position of the car, in the same coordinate system as `CircuitMarkers`. _float32_
 
-**About the sampling rate:** samples are not evenly spaced. The rate varies by season and session, from roughly 4 to 9 samples per second (most are around 7.5), because the car data and position streams are merged. Not every channel is measured at that rate (throttle, for example, changes about 4.5 times a second), so some values are interpolated between real readings. Use `time_ms` rather than assuming a fixed interval.
+**About the sampling rate:** samples are not evenly spaced. The rate varies by season and session, from roughly 4 to 9 samples per second (most are around 7.5), because the car data and position streams are merged (FastF1 does the same). Not every channel is measured at that rate (throttle, for example, changes about 4.5 times a second), so some values are interpolated between real readings. Use `time_ms` rather than assuming a fixed interval.
 
 
 ## Roadmap:
@@ -1504,6 +1510,7 @@ This project uses a split-licensing model to ensure that both the scraper applic
 
 * **Scraper Code:** Licensed under the **GNU General Public License v3 (GPLv3)**. Any modified versions of this code must also be made open-source under the same license. See [LICENSE.txt](https://github.com/f1database/f1database/blob/main/LICENSE.txt) for details.
 * **F1 Database/Datasets:** Licensed under the **Open Database License (ODbL) v1.0**. You are free to share, modify, and use the database. However, any altered or derivative versions of this database must also be released under the ODbL to keep the facts open-source. See [DATA-LICENCE.txt](https://github.com/f1database/f1database/blob/main/DATA-LICENCE.txt) for details.
+* **Telemetry files:** The Parquet files in `telemetry/` are third-party data and keep their own licences; they are not relicensed under the ODbL. Files from TracingInsights are licensed under the **Apache License 2.0**: keep the licence and notice in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) with them if you redistribute them. Files with `Source = 'FastF1'` were downloaded from the Formula 1 live timing service with the F1 TV account of whoever ran the scraper, so check the F1 TV terms of use before sharing them.
 
 ---
 
