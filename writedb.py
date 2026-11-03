@@ -612,6 +612,145 @@ def upsert_session_record(cursor, grandprix_name, session_data, grandprix_id):
     return cursor.lastrowid
 
 
+# --- formula1db.com session times (1961 onwards) and old qualifying (1961-1982) ---
+SCQ_FIRST_SEASON = 1961
+SCQ_LAST_QUALIFYING_SEASON = 1982
+_scq_scraper = None
+_scq_position = None  # (year, round) the shared scraper is currently on
+
+
+def get_scq_scraper(year, round_number):
+    """
+    Returns one shared browser positioned on this race. Consecutive rounds just
+    follow the site's "next race" link; anything else (first race, new season,
+    resuming mid-season) opens the race through the season/round list.
+    """
+    global _scq_scraper, _scq_position
+    from scrapers.scrape_schedules_and_old_qualifying_results import ScQScraper
+
+    if _scq_scraper is not None and _scq_position == (year, round_number - 1):
+        if _scq_scraper.go_to_next_race() is None:
+            raise RuntimeError(f"formula1db.com has no race after {year} round {round_number - 1}")
+    else:
+        if _scq_scraper is not None:
+            _scq_scraper.close_session()
+        _scq_scraper = ScQScraper()
+        _scq_scraper.launch(year, round_number)
+    _scq_position = (year, round_number)
+    if f"/races/{year}-" not in _scq_scraper.race_page:
+        raise RuntimeError(f"Expected a {year} race page for round {round_number}, got {_scq_scraper.race_page}")
+    return _scq_scraper
+
+
+def close_scq_scraper():
+    global _scq_scraper, _scq_position
+    if _scq_scraper is not None:
+        _scq_scraper.close_session()
+    _scq_scraper = None
+    _scq_position = None
+
+
+def save_scraped_schedule(cursor, grandprix_name, grandprix_id, schedule):
+    """
+    Writes the session times scraped from formula1db.com into Sessions. A session
+    that already exists (same canonical name) is updated, with unknown (None)
+    values never overwriting known ones; otherwise it is added.
+    """
+    for scheduled in schedule:
+        name = canonicalize_session_name(scheduled['session'])
+        start_utc = datetime.datetime.fromisoformat(scheduled['start_utc'].replace('Z', '+00:00')) if scheduled['start_utc'] else None
+        end_local = datetime.datetime.fromisoformat(scheduled['end_local']) if scheduled['end_local'] else None
+        end_utc = end_local.astimezone(datetime.timezone.utc) if end_local else None
+        start_local = datetime.datetime.fromisoformat(scheduled['start_local']) if scheduled['start_local'] else None
+
+        cursor.execute("SELECT ID, SessionNumber FROM Sessions WHERE GrandPrixID = ? AND SessionName = ? ORDER BY ID LIMIT 1",
+                       (grandprix_id, name))
+        existing = cursor.fetchone()
+        if existing:
+            session_number = existing[1]
+        else:
+            cursor.execute("SELECT COALESCE(MAX(SessionNumber), 0) + 1 FROM Sessions WHERE GrandPrixID = ?", (grandprix_id,))
+            session_number = cursor.fetchone()[0]
+
+        upsert_session_record(cursor, grandprix_name, {
+            'name': name,
+            'sessionnumber': session_number,
+            'wassessioncancelled': scheduled['cancelled'],
+            'starttimetimestamputc': int(start_utc.timestamp()) if start_utc else None,
+            'endtimetimestamputc': int(end_utc.timestamp()) if end_utc else None,
+            # Local timestamp = UTC epoch shifted by the local offset (wall-clock time read as UTC).
+            'starttimetimestamp': int(start_utc.timestamp() + start_local.utcoffset().total_seconds()) if start_local else None,
+            'endtimetimestamp': int(end_utc.timestamp() + end_local.utcoffset().total_seconds()) if end_local else None,
+            'precisestarttime': True if start_utc else None,
+            'startdtutc': start_utc,
+            'enddtutc': end_utc,
+            'startdt': start_local,
+            'enddt': end_local,
+            'timezone': scheduled['timezone'],
+        }, grandprix_id)
+
+
+def scq_gap(text):
+    text = text.strip()
+    return None if text in ('', '-', '?') else float(text.replace('+', ''))
+
+
+def scq_time(text):
+    text = text.strip()
+    return None if text in ('', '-', '?') else text
+
+
+def find_scq_entrant(results, row, grand_prix_name):
+    name = normalize_name(row['Driver'].replace('*', ''))
+    matches = [e for e in results if normalize_name(e['driver'].replace('*', '')) == name]
+    if len(matches) > 1:
+        matches = [e for e in matches if str(e['number']) == row['No.']]
+    if not matches:
+        matches = [e for e in results if str(e['number']) == row['No.'] and not e['substituteorthirddriver']]
+    if len(matches) != 1:
+        raise ValueError(f"Could not match qualifying row {row} to exactly one entrant in {grand_prix_name}")
+    return matches[0]
+
+
+def apply_scraped_qualifying(results, qualifying, grand_prix_name):
+    """
+    Merges formula1db.com qualifying (1961-1982) into the parsed entrants.
+    Per-session columns (qualifying1/2/3...) are set outright. Overall columns
+    only fill gaps, as StatsF1 already supplies them. Rows without a driver
+    link (withdrawn entries) have no result and are skipped.
+    """
+    for row in qualifying['overall']:
+        if 'Driver_id' not in row:
+            continue
+        entrant = find_scq_entrant(results, row, grand_prix_name)
+        time_text = scq_time(row['Time'])
+        values = {
+            'qualifyingposition': int(row['Pos.']) if row['Pos.'].isdigit() else None,
+            'qualifyingtime': time_text,
+            'qualifyinggap': scq_time(row['Gap']),
+            'qualifyingtimeinseconds': tts(time_text) if time_text else None,
+            'qualifyinggapseconds': scq_gap(row['Gap']),
+            'qualifyinginterval': scq_gap(row['Interval']),
+        }
+        for key, value in values.items():
+            if entrant.get(key) is None:
+                entrant[key] = value
+
+    for number, rows in qualifying['sessions'].items():
+        for row in rows:
+            if 'Driver_id' not in row:
+                continue
+            entrant = find_scq_entrant(results, row, grand_prix_name)
+            time_text = scq_time(row['Time'])
+            prefix = f'qualifying{number}'
+            entrant[f'{prefix}position'] = int(row['Pos.']) if row['Pos.'].isdigit() else None
+            entrant[f'{prefix}time'] = time_text
+            entrant[f'{prefix}timeinseconds'] = tts(time_text) if time_text else None
+            entrant[f'{prefix}gap'] = scq_gap(row['Gap'])
+            entrant[f'{prefix}interval'] = scq_gap(row['Interval'])
+            entrant[f'{prefix}laps'] = int(row['Laps']) if row.get('Laps', '').isdigit() else None
+
+
 def ensure_combined_qualifying_session(cursor, grandprix_name, grandprix_id, year):
     cursor.execute(
         """
@@ -5481,6 +5620,11 @@ for season in seasons[index:]:
                     dest.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapTime&size=100000')
                 if 'sprint-qualifying' in openurl or ('race' not in openurl and 'sprint' not in openurl):
                     lapchartstoberead.append(f'https://motorsportstats.com/api/result-statistics?sessionSlug={openurl}&sessionFact=LapChart&size=100000')
+        scq_schedule = None
+        if year >= SCQ_FIRST_SEASON:
+            scq_scraper = get_scq_scraper(year, grandsprix.index(grandprix) + 1)
+            scq_schedule = scq_scraper.scrape_schedule()
+            save_scraped_schedule(cur, gp, race_info['race_number'], scq_schedule)
         ensure_combined_qualifying_session(cur, gp, race_info['race_number'], year)
         save_race_control_messages(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
         save_weather_data(cur, year, grandsprix.index(grandprix) + 1, gp, race_info['race_number'])
@@ -5513,6 +5657,8 @@ for season in seasons[index:]:
         for result in results:
             if result['driver'] in name_corrections_results:
                 result['driver'] = name_corrections_results[result['driver']]
+        if SCQ_FIRST_SEASON <= year <= SCQ_LAST_QUALIFYING_SEASON:
+            apply_scraped_qualifying(results, scq_scraper.scrape_qualifying(schedule=scq_schedule), gp)
         print ("Results Parsed")
         entrant_keys = [
             "grandprix" ,"number", "driver", "nationality", "nationalityid", "team", "constructor", "chassis", "engine", "enginemodel", "tyre",
@@ -6699,6 +6845,7 @@ for table in tables_to_reset:
     cur.execute(f"UPDATE {table} SET needstatsupdate = 0 WHERE needstatsupdate = 1")
 
 conn.commit()
+close_scq_scraper()
 print("All stats successfully updated and flags reset.")
 
 update_schedules(cur)

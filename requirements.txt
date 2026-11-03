@@ -7,6 +7,7 @@ deep_translator
 curl_cffi
 ollama
 pillow
+seleniumbase
 # PaddleOCR-VL runs through transformers; install torch/torchvision from the
 # PyTorch index for CUDA, e.g. --index-url https://download.pytorch.org/whl/cu126
 torch

@@ -500,7 +500,7 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 5. ### Sessions
-   This table contains the schedule for every session (Practice, Qualifying, Sprint, Race) of a Grand Prix.
+   This table contains the schedule for every session (Practice, Qualifying, Sprint, Race) of a Grand Prix. From 1961 onwards, session start/end times and the circuit timezone also come from formula1db.com; where a session already exists its unknown values are filled in, otherwise the session is added. Many 1960s-70s sessions have no known time, leaving the time columns NULL.
    **Columns:**
    - **ID**: Unique session ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
    - **GrandPrix**: Name of the Grand Prix. _TEXT_
@@ -837,6 +837,8 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
     Monaco is the other exception: its first two practice sessions were held on Thursday rather than Friday, so they are stored in `thursdaypractice1` and `thursdaypractice2`. Those columns are `NULL` for every other Grand Prix, and both `fridaypractice` columns are `NULL` for Monaco. Every race, Monaco included, has both Saturday sessions.
 
     The source publishes only position, driver, team, and best lap for these sessions, so there is no laps-completed count and the Friday/Saturday practice columns have no `laps` equivalent. Times set in wet conditions are recorded as ordinary times, since there is no per-session conditions field. Not every entrant appears in every session, so a driver who did not run will have `NULL`s for that session.
+
+    For 1961-1982, the separate qualifying sessions (`qualifying1`, `qualifying2`, `qualifying3`, including laps where known) come from formula1db.com. The overall `qualifying` columns only get values from there where StatsF1 had none.
 
     We have data for the two qualifying sessions on Friday and Saturday in the old format, Q1 and Q2 only after 1983. To find drivers who did not pre-qualify or qualify, it is there in overall qualifying. We have data for the Sunday morning warm-up session from 1984 till 2003, when the session no longer happened. 
 

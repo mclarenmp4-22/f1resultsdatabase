@@ -77,7 +77,7 @@ _NEXT_RACE_JS = r"""
 
 SESSION_LABELS = {
     "P1": "Practice 1", "P2": "Practice 2", "P3": "Practice 3",
-    "Q1": "Qualifying 1", "Q2": "Qualifying 2", "Q3": "Qualifying 3",
+    "Q": "Qualifying", "Q1": "Qualifying 1", "Q2": "Qualifying 2", "Q3": "Qualifying 3",
     "R": "Race",
 }
 
@@ -87,24 +87,58 @@ class ScQScraper:
         self.sb = sb_cdp.Chrome(incognito=True)
         self.launched = False
         self.current_page = None
+        self.race_page = None
         self.next_page = None
+
+    def __slow_scroll_to_bottom(self, step=400, pause=0.15):
+        # sb_cdp has no slow_scroll_to(), so scroll in steps until the bottom.
+        # Loads lazy content and looks less robotic than a jump.
+        while self.sb.evaluate(
+            "window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 2"
+        ):
+            self.sb.scroll_by_y(step)
+            self.sb.sleep(pause)
 
     def __handle_page_change(self, url):
         self.sb.goto(url)
-        self.sb.sleep(4)
+        self.sb.sleep(8)
         self.sb.solve_captcha()
+        self.__slow_scroll_to_bottom()
         self.sb.sleep(2.5)
         self.current_page = url
         if re.search(r"/races/[^/?#]+/?$", url.split("?")[0]):
             self.__update_next_page()
 
     def launch(self, season, round):
-        if not self.launched:
+        if self.launched:
+            return
+        attempts = 3
+        for attempt in range(1, attempts + 1):
             self.__handle_page_change(f"https://www.formula1db.com/races?season={season}&round={round}")
-            self.sb.click("ul.race-list li.RaceIndexListItem_container__oTdbC:nth-child(1)")
-            self.sb.sleep(2.5)
+            self.sb.sleep(4)
+            # The site is flaky here: the list item is sometimes missing or the
+            # click doesn't navigate. Retry those, but fail loudly on the last.
+            try:
+                self.sb.click("ul#race-name-list li:nth-child(1)")
+                self.sb.sleep(2.5)
+                # Clicking a race changes the browser location, but
+                # __handle_page_change above only recorded the index URL. Keep
+                # the actual race URL so the first scrape doesn't navigate back
+                # to /races/.
+                current = self.sb.get_current_url()
+                if not re.search(r"/races/[^/?#]+/?(?:[?#].*)?$", current):
+                    raise RuntimeError(
+                        f"Expected a race detail page after selecting season {season} "
+                        f"round {round}, got {current!r}"
+                    )
+            except Exception:
+                if attempt == attempts:
+                    raise
+                continue
+            self.current_page = self.race_page = current
             self.__update_next_page()
-            self.launched = True            
+            self.launched = True
+            return
 
     def scrape_schedule(self, race_url=None):
         """
@@ -117,17 +151,23 @@ class ScQScraper:
         date/time/start_local = None.
         """
         if race_url is None:
-            race_url = self.sb.get_current_url()
+            race_url = self.race_page
         race_url = race_url.split("?")[0].split("#")[0]
-        # Full page load so __next_f holds THIS race's data.
-        self.__handle_page_change(race_url)
-
-        raw = self.sb.evaluate(_SCHEDULE_JS)
-        if not raw:
-            self.sb.sleep(3)
+        # Full page load so __next_f holds THIS race's data. Navigating to the
+        # URL the browser is already on (e.g. right after launch() clicked into
+        # it) doesn't refresh the payload, so leave the page first. The payload
+        # is in the initial HTML, so waiting doesn't help when it's missing;
+        # only a fresh load does.
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            self.sb.goto("about:blank")
+            self.sb.sleep(1)
+            self.__handle_page_change(race_url)
             raw = self.sb.evaluate(_SCHEDULE_JS)
-        if not raw:
-            return []
+            if raw:
+                break
+        else:
+            raise RuntimeError(f"No sessions payload found on {race_url} after {attempts} loads")
 
         data = json.loads(raw)
         tz = ZoneInfo(data["timeZone"]) if data.get("timeZone") else None
@@ -156,48 +196,54 @@ class ScQScraper:
         return schedule
 
     def __scrape_results_table(self, url):
-        """Returns a list of row dicts, or None if the page has no table."""
+        """Returns a list of row dicts. Raises if the page has no table."""
         self.__handle_page_change(url)
         raw = self.sb.evaluate(_RESULT_TABLE_JS)
-        if not raw:  # slow render? one retry before treating it as missing
+        if not raw:  # slow render? one retry
             self.sb.sleep(3)
             raw = self.sb.evaluate(_RESULT_TABLE_JS)
-        return json.loads(raw)["rows"] if raw else None
+        if not raw:
+            raise RuntimeError(f"No results table found on {url}")
+        return json.loads(raw)["rows"]
 
-    def scrape_qualifying(self, race_url=None, max_sessions=5):
+    def scrape_qualifying(self, race_url=None, schedule=None):
         """
         Scrapes the "Qualifying" section of a race, e.g. for
         https://www.formula1db.com/races/1961-monaco-grand-prix
 
+        The race's own schedule says which qualifying sessions exist (codes
+        Q1, Q2, Q3, or a bare Q), so only those pages are loaded. Pass the result of
+        scrape_schedule() as `schedule` to avoid loading it a second time.
+
         Returns {"overall": [...], "sessions": {1: [...], 2: [...], 3: [...]}}
           - "overall" is /results/qualifying (the combined classification)
-          - "sessions" has one entry per /results/qualifying/N page that
-            exists, so Monaco 1961 gives 1, 2 and 3, while 1961 Italian
-            gives 1 and 2. Every N from 1 to max_sessions is tried and
-            missing pages are skipped, so a gap (no Q1 but a Q2) still
-            returns the Q2 data.
+          - "sessions" has one entry per Q<N> in the schedule, fetched from
+            /results/qualifying/N, so Monaco 1961 gives 1, 2 and 3.
         Each row is keyed by the table headers (Pos., No., Driver, Team,
         Constructor, Time, Gap, Interval, plus Laps / Note when present), with
         extra Driver_id / Team_id / Constructor_id keys. Values are the site's
         raw text: "-" means none, "?" means unknown.
-        Races with no qualifying data (e.g. 1953 Monaco) return empty results
-        (after max_sessions + 1 page loads, since nothing is assumed missing).
+        A bare Q gives only "overall". Races whose schedule has no Q sessions
+        return empty results without loading any page. A listed session with no results
+        table raises.
         """
         if race_url is None:
-            race_url = self.sb.get_current_url()
+            race_url = self.race_page
         race_url = race_url.split("?")[0].split("#")[0].rstrip("/")
         race_url = re.sub(r"/(entries|results)(/.*)?$", "", race_url)
         base = f"{race_url}/results/qualifying"
 
-        # Every page is tried independently: a missing overall page or a
-        # missing Q1 doesn't mean Q2/Q3 are missing too.
-        overall = self.__scrape_results_table(base) or []
+        if schedule is None:
+            schedule = self.scrape_schedule(race_url)
+        codes = [s["code"] for s in schedule if re.fullmatch(r"Q\d*", s["code"])]
+        if not codes:
+            return {"overall": [], "sessions": {}}
+        # A bare "Q" (e.g. 1953 Argentina) is a single session whose results
+        # live only on the overall page; Q1/Q2/Q3 also have /qualifying/N.
+        numbers = sorted(int(c[1:]) for c in codes if len(c) > 1)
 
-        sessions = {}
-        for n in range(1, max_sessions + 1):
-            rows = self.__scrape_results_table(f"{base}/{n}")
-            if rows is not None:
-                sessions[n] = rows
+        overall = self.__scrape_results_table(base)
+        sessions = {n: self.__scrape_results_table(f"{base}/{n}") for n in numbers}
         return {"overall": overall, "sessions": sessions}
 
     def __update_next_page(self):
@@ -219,6 +265,7 @@ class ScQScraper:
             return None
         url = self.next_page
         self.__handle_page_change(url)
+        self.race_page = url
         self.__update_next_page()  # now points at the race after this one
         return url    
 
