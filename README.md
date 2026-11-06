@@ -102,9 +102,11 @@ The base database builds without AI. A single `F1_AI_TIER` environment variable 
 | Tier | Engine matching | Circuit layout OCR |
 |---|---|---|
 | `none` | Deterministic matching; unresolved historical matches stay for review. | CPU image processing and Tesseract only. |
-| `low` | `qwen3-vl:2b` | `qwen3-vl:2b` plus Tesseract. |
-| `medium` | `llama3.1:8b` | Current multi-reader pipeline: `qwen3-vl:4b`, `minicpm-v4.6:1b`, PaddleOCR-VL, docTR, EasyOCR, and TrOCR. |
-| `high` | `llama3.1:70b` | Current multi-reader pipeline with `qwen3-vl:8b` as the map reader. |
+| `low` | `qwen3:1.7b` | `qwen3-vl:2b` plus Tesseract. |
+| `medium` | `qwen3:4b` | Current multi-reader pipeline: `qwen3-vl:4b`, `minicpm-v4.6:1b`, PaddleOCR-VL, docTR, EasyOCR, and TrOCR. |
+| `high` | `qwen3:14b` | Current multi-reader pipeline with `qwen3-vl:8b` as the map reader. |
+
+Engine matching uses text-only Qwen3 models (not the vision variants): the 4B medium model is the recommended tier for machines with 6 GB of VRAM, while high uses a stronger 14B model without requiring a 70B model.
 
 To select a tier for the current PowerShell session, set:
 
@@ -131,9 +133,10 @@ Tier `none` still needs the Tesseract binary and Latin tessdata for circuit labe
 ollama pull qwen3-vl:2b
 ollama pull qwen3-vl:4b
 ollama pull qwen3-vl:8b
+ollama pull qwen3:1.7b
+ollama pull qwen3:4b
+ollama pull qwen3:14b
 ollama pull openbmb/minicpm-v4.6:1b
-ollama pull llama3.1:8b
-ollama pull llama3.1:70b
 ```
 
 2. **Medium and High OCR extras** (all in `requirements.txt`, plus one binary):
@@ -147,8 +150,6 @@ Normal scraping preserves existing circuit layout SVGs and metadata, updating on
 
 ## Download the latest version:
 To download the latest version of the database, please go to [GitHub Releases](https://github.com/mclarenmp4-22/f1resultsdatabase/releases/latest) and download the latest version.
-
-**Last updated: 2026 Italian Grand Prix**
 
 ## Update the database:
 If you want to update the database, all you need to do is run this command:

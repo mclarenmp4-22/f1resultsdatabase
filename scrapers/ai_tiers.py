@@ -9,9 +9,9 @@ AI_TIERS = ("none", "low", "medium", "high")
 DEFAULT_AI_TIER = "none"
 
 ENGINE_MODELS = {
-    "low": "qwen3-vl:2b",
-    "medium": "llama3.1:8b",
-    "high": "llama3.1:70b",
+    "low": "qwen3:1.7b",
+    "medium": "qwen3:4b",
+    "high": "qwen3:14b",
 }
 
 CIRCUIT_PRIMARY_MODELS = {

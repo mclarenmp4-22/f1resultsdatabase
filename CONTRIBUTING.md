@@ -62,18 +62,19 @@ You only need this if you work on `scrapers/circuit_layout_scraper.py` (`Circuit
 
 | Tier | Required Ollama models |
 |---|---|
-| `low` | `qwen3-vl:2b` |
-| `medium` | `qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:8b` |
-| `high` | `qwen3-vl:8b`, `openbmb/minicpm-v4.6:1b`, `llama3.1:70b` |
+| `low` | `qwen3-vl:2b`, `qwen3:1.7b` |
+| `medium` | `qwen3-vl:4b`, `openbmb/minicpm-v4.6:1b`, `qwen3:4b` |
+| `high` | `qwen3-vl:8b`, `openbmb/minicpm-v4.6:1b`, `qwen3:14b` |
 
 Pull the Ollama models listed for the tier you plan to use. For example, the full set can be installed with:
 ```bash
 ollama pull qwen3-vl:2b
 ollama pull qwen3-vl:4b
 ollama pull qwen3-vl:8b
+ollama pull qwen3:1.7b
+ollama pull qwen3:4b
+ollama pull qwen3:14b
 ollama pull openbmb/minicpm-v4.6:1b
-ollama pull llama3.1:8b
-ollama pull llama3.1:70b
 ```
 
 Set Medium for the current PowerShell session with:

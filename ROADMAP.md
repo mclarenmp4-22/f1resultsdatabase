@@ -37,6 +37,7 @@ Please check the [issues section](https://github.com/mclarenmp4-22/f1resultsdata
 ## Short term goals:
 
 1. We want to scrape FIA's decision documents to get information. This needs to be able to handle various different types of documents, and also save images or, the bounding boxes for the image regions in the database.
+2. We would like to upgrade the Sessions table, such that it includes all sessions that we go through, such as warm-up sessions and pre-qualifying sessions. Further, this would also include the session name, session type, and session length, and session time. (Session times from 1961 to 1984 for qualifying and practice sessions can be found here: https://www.formula1db.com/races/ and old race times can be found here: https://www.chicanef1.com/) 
 
 ## Medium-term goals:
 1. From the OpenF1 API, we want to add mini-sector data, and the overtakes data. As the OpenF1 API has data from 2023 onwards, we want to ingest data from 2018 onwards and use that data to update the database.
