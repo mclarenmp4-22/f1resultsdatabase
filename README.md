@@ -25,7 +25,7 @@ Or, you can do some cool data analysis with all this data.
 
 This is the most comprehensive F1 database with:
 - **Every World Championship Grand Prix** result since 1950.
-- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times, tyre compounds, and stints from 2018 onwards.
+- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times from 2018 onwards, race tyre compounds and stints from 2015 onwards (every session from 2018).
 - **Full session coverage**: Complete results for Practice, Qualifying, Sprints, and Races.
 - **Accurate historical data**: Includes shared car results, pre-qualifying, and vintage scoring systems.
 - **Pit stop summary**: Includes pit stop data from 1983 onwards, including pit stop times from 2018 onwards.
@@ -519,7 +519,7 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
    - **needstatsupdate**: Internal flag for statistical calculations. _BOOLEAN_
 
 5. ### Sessions
-   This table contains the schedule for every session (Practice, Qualifying, Sprint, Race) of a Grand Prix. From 1961 onwards, session start/end times and the circuit timezone also come from formula1db.com; where a session already exists its unknown values are filled in, otherwise the session is added. Many 1960s-70s sessions have no known time, leaving the time columns NULL.
+   This table contains the schedule for every session (Practice, Qualifying, Sprint, Race) of a Grand Prix. This data is available intermittently from 1961. The sessions, their start/end times and the circuit timezone come from formula1db.com. Many sessions up to the 1970s have no known time, leaving the time columns NULL.
    **Columns:**
    - **ID**: Unique session ID. _INTEGER PRIMARY KEY AUTOINCREMENT_
    - **GrandPrix**: Name of the Grand Prix. _TEXT_
@@ -857,7 +857,7 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
 
     The source publishes only position, driver, team, and best lap for these sessions, so there is no laps-completed count and the Friday/Saturday practice columns have no `laps` equivalent. Times set in wet conditions are recorded as ordinary times, since there is no per-session conditions field. Not every entrant appears in every session, so a driver who did not run will have `NULL`s for that session.
 
-    For 1961-1982, the separate qualifying sessions (`qualifying1`, `qualifying2`, `qualifying3`, including laps where known) come from formula1db.com. The overall `qualifying` columns only get values from there where StatsF1 had none.
+    For 1961-1982, the separate qualifying sessions (`qualifying1`, `qualifying2`, `qualifying3`, including laps where known) come from formula1db.com. The overall `qualifying` columns only get values from there where StatsF1 had none. From 2006 (knockout qualifying), the position, time, gap, interval and laps of each segment (`qualifying1`, `qualifying2`, `qualifying3`) also come from formula1db.com; these are the positions as the segment was run, before any later exclusion. The sprint qualifying segments (`sprint_qualifying1`, `sprint_qualifying2`, `sprint_qualifying3`) are filled the same way.
 
     We have data for the two qualifying sessions on Friday and Saturday in the old format, Q1 and Q2 only after 1983. To find drivers who did not pre-qualify or qualify, it is there in overall qualifying. We have data for the Sunday morning warm-up session from 1984 till 2003, when the session no longer happened. 
 
@@ -924,11 +924,19 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
     - **qualifying1interval**: Gap to the car ahead in Q1. _REAL_
     - **qualifying1laps**: Q1 laps. _INTEGER_
     - **qualifyinglaps**: Qualifying laps. _INTEGER_
+    - **qualifying3position**: Q3 position. _INTEGER_
+    - **qualifying3laps**: Q3 laps. _INTEGER_
     - **qualifying3time**: Q3 time. _TEXT_
     - **qualifying3gap**: Q3 gap string. _REAL_
     - **qualifying3interval**: Gap to the car ahead in Q3. _REAL_
     - **qualifying3timeinseconds**: Q3 time in seconds. _REAL_
     - **sprint_qualifyingposition**: Sprint qualifying position. _INTEGER_
+    - **sprint_qualifying1position**: Sprint Q1 position. _INTEGER_
+    - **sprint_qualifying2position**: Sprint Q2 position. _INTEGER_
+    - **sprint_qualifying3position**: Sprint Q3 position. _INTEGER_
+    - **sprint_qualifying1laps**: Sprint Q1 laps. _INTEGER_
+    - **sprint_qualifying2laps**: Sprint Q2 laps. _INTEGER_
+    - **sprint_qualifying3laps**: Sprint Q3 laps. _INTEGER_
     - **sprint_qualifying1time**: Sprint Q1 time. _TEXT_
     - **sprint_qualifying2time**: Sprint Q2 time. _TEXT_
     - **sprint_qualifying3time**: Sprint Q3 time. _TEXT_
@@ -1085,7 +1093,7 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
     - **Session**: Name of the session. _TEXT_
     - **Time**: Lap time. Available from 1996. _TEXT_
     - **TimeInSeconds**: Lap time in seconds. _REAL_
-    - **TyreCompound**: The tyre compound used on this lap (Soft, Medium, Hard, etc.). _TEXT_
+    - **TyreCompound**: The tyre compound used on this lap (Soft, Medium, Hard, etc.). For the 2015-2017 races this comes from the motorsport.com tyre history, placed on laps with the pit stops in PitStopSummary; a driver whose stints do not fit his pit stops is left empty. _TEXT_
     - **StintNumber**: The current stint number for the driver. A stint is a period of time during which the driver did not pass through the pit lane.  A new stint starts the lap in which the driver exits the pit lane. So, even if the driver does not change tyres, a new stint is started. _INTEGER_
     - **Sector1Time**: Time spent in Sector 1. _REAL_
     - **Sector2Time**: Time spent in Sector 2. _REAL_
@@ -1244,7 +1252,7 @@ Only rows with `StatsF1Data IS NULL` are scraped. Ollama is required only for `l
     - **RaceReport**: The full text of the race report. _TEXT_
 
 22. ### MaxSpeeds
-    This table contains the maximum speed of each driver in a particular measuring point (Speed Trap, Intermediate 1, Intermediate 2, Finishing Line) for sessions from 2006 onwards. 
+    This table contains the maximum speed of each driver in a particular measuring point (Speed Trap, Intermediate 1, Intermediate 2, Finishing Line) for sessions from 2006 onwards. The source this table was scraped from has gone offline (see issue #18), so `writedb.py` does not currently fill it; a replacement source is yet to be added.
 
     **Columns:**
     - **GrandPrixName** Name of the Grand Prix _TEXT_,

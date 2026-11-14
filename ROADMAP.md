@@ -8,7 +8,7 @@ These are also all features that are currently **not** available in the database
 
 This database has been created with the aim of being the most comprehensive database containing all the information about Formula 1 since 1950. We currently have:
 - **Every World Championship Grand Prix** result since 1950.
-- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times, tyre compounds, and stints from 2018 onwards.
+- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times from 2018 onwards, race tyre compounds and stints from 2015 onwards (every session from 2018).
 - **Full session coverage**: Complete results for Practice, Qualifying, Sprints, and Races.
 - **Accurate historical data**: Includes shared car results, pre-qualifying, and vintage scoring systems.
 - **Pit stop summary**: Includes pit stop data from 1983 onwards, including pit stop times from 2018 onwards.
@@ -48,7 +48,7 @@ Please check the [issues section](https://github.com/mclarenmp4-22/f1resultsdata
 6. Try to get live timing data like sector times from seasons in the 2000s and 2010s as well. (https://github.com/TUMFTM/f1-timing-database, https://f1.tfeed.net/) If possible, get live timing data from the 1990s too.
 7. Parse the schedule of past and present seasons and add them to the database. (If possible, check versions of the schedule as well.)
 *This goal has partly been fulfilled, with schedule info coming from FastF1, however past versions of the schedule are not available, which we may need to get from a source such as the Wayback Machine.*
-8. Get tyre history from here: https://www.motorsport.com/f1/results/2016/australian-gp-53288/?st=TH
+*This goal has been mostly fulfilled: race tyre compounds for 2015-2017 are in LapByLap. motorsport.com has no tyre history before 2015, none for the 2015 Hungarian and Mexican Grands Prix, and no lap counts (so no TyreAge) for the first races of 2015. A few drivers whose stints do not fit their pit stops are still empty.*
 9. We want to add historical weather data to the database. Grands Prix depend a lot on the weather, and FastF1 also unfortunately does not have the exact precipitation, it just has a boolean on whether it rains or not. We will want granular weather data accurate to a very small precision and regularly updated wherever available. For older races, we might have to settle for lower accuracy and/or less regular updates.
 However, for newer races, we want to have the most accurate data possible. We might want soil temperature as a substitute for track temperature. We can have air temperature and pressure, humidity, precipitation, and other important weather data.
 *This goal has been partly fulfilled, but we still only have hourly data from Open-Meteo, and we would like more granular data. We could add GPM IMERG data to the database from June 2000 onwards, and MRMS 2-minute data and Europe's OPERA, Japan's JMA, and so on.*

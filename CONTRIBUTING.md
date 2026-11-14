@@ -114,7 +114,7 @@ Open an issue with the label `data error` and include:
 - **What the database says** and **what it should say**.
 - **A source.** This matters more than anything else.
 
-Good sources, roughly in order of how much we trust them: official FIA documents and F1.com timing sheets, [StatsF1](https://www.statsf1.com), [Motorsport Stats](https://motorsportstats.com), [GP Racing Stats](https://gpracingstats.com), then Wikipedia. If two sources disagree, say so in the issue — historical F1 data genuinely conflicts sometimes, and knowing that a conflict exists is useful in itself.
+Good sources, roughly in order of how much we trust them: official FIA documents and F1.com timing sheets, [StatsF1](https://www.statsf1.com), [GP Racing Stats](https://gpracingstats.com), then Wikipedia. If two sources disagree, say so in the issue — historical F1 data genuinely conflicts sometimes, and knowing that a conflict exists is useful in itself.
 
 ## Requesting features
 
@@ -141,7 +141,7 @@ At the same time, don't overthink it. Ask as many questions as you need in the i
 
 **3. Fail loudly.** Do not add broad `try`/`except` blocks unless they are absolutely necessary. If something fails, we want it to fail visibly so it gets fixed. A silent `except: pass` that swallows a scraping error means the database quietly ends up with missing rows, and nobody notices for months. That is far worse than a crash.
 
-**4. Be considerate to the sources.** The scrapers hit StatsF1, Motorsport Stats, Pitwall, Wikipedia, and others. Keep the existing rate limiting and random pauses in place. The Wikipedia REST API in particular only allows 500 requests per hour.
+**4. Be considerate to the sources.** The scrapers hit StatsF1, formula1db.com, motorsport.com, Pitwall, Wikipedia, and others. Keep the existing rate limiting and random pauses in place. The Wikipedia REST API in particular only allows 500 requests per hour.
 
 **5. Keep the LLM/OCR pipeline deterministic and local.** Both scrapers follow `F1_AI_TIER` (`none` by default). Keep temperatures at 0.0 and the per-tier model mapping in `scrapers/ai_tiers.py`; keep the fail-loud behaviour (unmatched engine entries abort the make, unreadable direction stores NULL with a warning plus a `DIRECTION_OVERRIDES` pointer, disputed labels are kept with `data-review="1"` rather than silently dropped); and keep the model unload/`empty_cache` calls for the multi-reader tiers.
 

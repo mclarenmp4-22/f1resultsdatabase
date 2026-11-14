@@ -7,9 +7,11 @@ Usage:
     python updaters/update_schedules_and_old_qualifying_results.py --seasons 1961-1982
     python updaters/update_schedules_and_old_qualifying_results.py --races "1961 Monaco Grand Prix" "1961 Dutch Grand Prix"
 
-Schedule session times are available from 1961 onwards. The separately classified
+Schedules are available for every season. The separately classified
 old qualifying sessions are available from 1961 through 1982. Overall qualifying
 values are only filled where the existing database has no value, matching writedb.py.
+From 2006 the Q1/Q2/Q3 segments of knockout qualifying are refreshed as well, along
+with the SQ1/SQ2/SQ3 segments of sprint qualifying.
 """
 
 import argparse
@@ -21,8 +23,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "sessionresults.db"
-FIRST_SEASON = 1961
+FIRST_OLD_QUALIFYING_SEASON = 1961
 LAST_OLD_QUALIFYING_SEASON = 1982
+FIRST_KNOCKOUT_SEASON = 2006
 sys.path.insert(0, str(ROOT))
 
 from scrapers.scrape_schedules_and_old_qualifying_results import ScQScraper
@@ -137,7 +140,8 @@ def save_schedule(cur, gp, schedule):
             )
 
 
-def apply_qualifying(cur, gp, qualifying):
+def apply_qualifying(cur, gp, qualifying, prefix="qualifying"):
+    """prefix="sprint_qualifying" writes the SQ1/SQ2/SQ3 segments instead of Q1/Q2/Q3."""
     updated = 0
     for row in qualifying["overall"]:
         if "Driver_id" not in row:
@@ -161,20 +165,28 @@ def apply_qualifying(cur, gp, qualifying):
             updated += 1
 
     for number, rows in qualifying["sessions"].items():
-        prefix = f"qualifying{number}"
-        columns = [f"{prefix}position", f"{prefix}time", f"{prefix}timeinseconds", f"{prefix}gap", f"{prefix}interval", f"{prefix}laps"]
+        session_prefix = f"{prefix}{number}"
+        columns = [f"{session_prefix}position", f"{session_prefix}time", f"{session_prefix}timeinseconds", f"{session_prefix}gap", f"{session_prefix}interval", f"{session_prefix}laps"]
         for row in rows:
             if "Driver_id" not in row:
                 continue
             rowid = find_entrant(cur, row, gp["id"], gp["name"])
             lap_time = scq_time(row["Time"])
-            values = (
-                int(row["Pos."]) if row["Pos."].isdigit() else None,
-                lap_time, time_in_seconds(lap_time), scq_gap(row["Gap"]), scq_gap(row["Interval"]),
-                int(row["Laps"]) if row.get("Laps", "").isdigit() else None,
-            )
+            values = {
+                f"{session_prefix}position": int(row["Pos."]) if row["Pos."].isdigit() else None,
+                f"{session_prefix}time": lap_time,
+                f"{session_prefix}timeinseconds": time_in_seconds(lap_time),
+                f"{session_prefix}gap": scq_gap(row["Gap"]),
+                f"{session_prefix}interval": scq_gap(row["Interval"]),
+                f"{session_prefix}laps": int(row["Laps"]) if row.get("Laps", "").isdigit() else None,
+            }
             cur.execute(f"SELECT {', '.join(columns)} FROM GrandPrixResults WHERE rowid=?", (rowid,))
             old = cur.fetchone()
+            stored = dict(zip(columns, old))
+            # The session leader has no gap on formula1db.com; keep the one already stored.
+            if values[f"{session_prefix}gap"] is None:
+                values[f"{session_prefix}gap"] = stored[f"{session_prefix}gap"]
+            values = tuple(values[column] for column in columns)
             if values != old:
                 cur.execute(f"UPDATE GrandPrixResults SET {', '.join(c + '=?' for c in columns)} WHERE rowid=?", values + (rowid,))
                 updated += 1
@@ -239,8 +251,6 @@ def main():
         for row in select_grands_prix(cur, args.races, seasons)
     ]
     for gp in gps:
-        if gp["season"] < FIRST_SEASON:
-            raise ValueError(f"formula1db.com schedule data starts in {FIRST_SEASON}; {gp['name']} is {gp['season']}.")
         if gp["round"] is None:
             raise ValueError(f"{gp['name']} has no RoundNumber in the database.")
 
@@ -269,12 +279,19 @@ def main():
             schedule = scraper.scrape_schedule()
             print(f"Refreshing {len(schedule)} scheduled sessions for {gp['name']}.")
             save_schedule(cur, gp, schedule)
-            if gp["season"] <= LAST_OLD_QUALIFYING_SEASON:
+            if FIRST_OLD_QUALIFYING_SEASON <= gp["season"] <= LAST_OLD_QUALIFYING_SEASON:
                 qualifying = scraper.scrape_qualifying(schedule=schedule)
                 changed = apply_qualifying(cur, gp, qualifying)
                 print(f"Refreshed historical qualifying values in {changed} entrant rows.")
+            elif gp["season"] >= FIRST_KNOCKOUT_SEASON:
+                qualifying = scraper.scrape_qualifying(schedule=schedule, overall=False)
+                changed = apply_qualifying(cur, gp, qualifying)
+                print(f"Refreshed Q1/Q2/Q3 values in {changed} entrant rows.")
+                sprint_qualifying = scraper.scrape_sprint_qualifying(schedule=schedule)
+                changed = apply_qualifying(cur, gp, sprint_qualifying, prefix="sprint_qualifying")
+                print(f"Refreshed SQ1/SQ2/SQ3 values in {changed} entrant rows.")
             else:
-                print(f"{gp['season']} is outside the {FIRST_SEASON}-{LAST_OLD_QUALIFYING_SEASON} old qualifying range; qualifying was skipped.")
+                print(f"{gp['season']} is outside the {FIRST_OLD_QUALIFYING_SEASON}-{LAST_OLD_QUALIFYING_SEASON} old qualifying range; qualifying was skipped.")
             previous_gp = gp
     finally:
         if scraper is not None:

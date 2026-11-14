@@ -4,7 +4,7 @@
 This is f1resultsdatabase. This aims to be the most comprehensive database containing all the information about Formula 1 since 1950.
 We currently have:
 - **Every World Championship Grand Prix** result since 1950.
-- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times, tyre compounds, and stints from 2018 onwards.
+- **Detailed lap-by-lap data** positions from 1950 onwards, lap times from 1996 onwards, sector times from 2018 onwards, race tyre compounds and stints from 2015 onwards (every session from 2018).
 - **Full session coverage**: Complete results for Practice, Qualifying, Sprints, and Races.
 - **Accurate historical data**: Includes shared car results, pre-qualifying, and vintage scoring systems.
 - **Pit stop summary**: Includes pit stop data from 1983 onwards, including pit stop times from 2018 onwards.

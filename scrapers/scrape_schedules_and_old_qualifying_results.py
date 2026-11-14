@@ -75,11 +75,31 @@ _NEXT_RACE_JS = r"""
 })()
 """
 
+# formula1db.com session codes, as seen on its race pages: FP1-FP4, Q0 (pre-qualifying),
+# Q (single session), Q1-Q3, SQ1-SQ3, S, WU, R.
 SESSION_LABELS = {
-    "P1": "Practice 1", "P2": "Practice 2", "P3": "Practice 3",
-    "Q": "Qualifying", "Q1": "Qualifying 1", "Q2": "Qualifying 2", "Q3": "Qualifying 3",
-    "R": "Race",
+    "Q0": "Pre-Qualifying", "Q": "Qualifying", "S": "Sprint", "WU": "Warm-up", "R": "Race",
 }
+NUMBERED_SESSION_LABELS = {"FP": "Practice", "P": "Practice", "Q": "Qualifying", "SQ": "Sprint Qualifying"}
+
+
+def session_label(code, season):
+    """
+    The session name stored in the database for a formula1db.com session code.
+    The Saturday sprint was called Sprint Qualifying in 2021-2022, and its
+    qualifying was the Sprint Shootout in 2023 only. An unknown code raises.
+    """
+    if code == "S" and season in (2021, 2022):
+        return "Sprint Qualifying"
+    if code in SESSION_LABELS:
+        return SESSION_LABELS[code]
+    numbered = re.fullmatch(r"(FP|P|Q|SQ)([1-9])", code)
+    if not numbered:
+        raise ValueError(f"Unknown formula1db.com session code {code!r} in {season}")
+    kind = NUMBERED_SESSION_LABELS[numbered.group(1)]
+    if kind == "Sprint Qualifying" and season == 2023:
+        kind = "Sprint Shootout"
+    return f"{kind} {numbered.group(2)}"
 
 
 class ScQScraper:
@@ -170,6 +190,7 @@ class ScQScraper:
             raise RuntimeError(f"No sessions payload found on {race_url} after {attempts} loads")
 
         data = json.loads(raw)
+        season = int(re.search(r"/races/(\d{4})-", race_url).group(1))
         tz = ZoneInfo(data["timeZone"]) if data.get("timeZone") else None
 
         def to_local(iso):
@@ -183,7 +204,7 @@ class ScQScraper:
             start = to_local(s.get("startTime"))
             end = to_local(s.get("endTime"))
             schedule.append({
-                "session": SESSION_LABELS.get(s["name"], s["name"]),
+                "session": session_label(s["name"], season),
                 "code": s["name"],
                 "date": start.strftime("%Y-%m-%d") if start else None,
                 "time": start.strftime("%H:%M") if start else None,
@@ -206,7 +227,7 @@ class ScQScraper:
             raise RuntimeError(f"No results table found on {url}")
         return json.loads(raw)["rows"]
 
-    def scrape_qualifying(self, race_url=None, schedule=None):
+    def scrape_qualifying(self, race_url=None, schedule=None, overall=True):
         """
         Scrapes the "Qualifying" section of a race, e.g. for
         https://www.formula1db.com/races/1961-monaco-grand-prix
@@ -223,6 +244,8 @@ class ScQScraper:
         Constructor, Time, Gap, Interval, plus Laps / Note when present), with
         extra Driver_id / Team_id / Constructor_id keys. Values are the site's
         raw text: "-" means none, "?" means unknown.
+        overall=False skips the combined classification page ("overall" comes back
+        empty), for when only the Q<N> sessions are wanted.
         A bare Q gives only "overall". Races whose schedule has no Q sessions
         return empty results without loading any page. A listed session with no results
         table raises.
@@ -235,16 +258,39 @@ class ScQScraper:
 
         if schedule is None:
             schedule = self.scrape_schedule(race_url)
-        codes = [s["code"] for s in schedule if re.fullmatch(r"Q\d*", s["code"])]
+        # A cancelled session (Q3 at the 2015 United States Grand Prix) has no results page.
+        codes = [s["code"] for s in schedule if re.fullmatch(r"Q\d*", s["code"]) and not s["cancelled"]]
         if not codes:
             return {"overall": [], "sessions": {}}
         # A bare "Q" (e.g. 1953 Argentina) is a single session whose results
         # live only on the overall page; Q1/Q2/Q3 also have /qualifying/N.
         numbers = sorted(int(c[1:]) for c in codes if len(c) > 1)
 
-        overall = self.__scrape_results_table(base)
+        overall = self.__scrape_results_table(base) if overall else []
         sessions = {n: self.__scrape_results_table(f"{base}/{n}") for n in numbers}
         return {"overall": overall, "sessions": sessions}
+
+    def scrape_sprint_qualifying(self, race_url=None, schedule=None):
+        """
+        Scrapes the SQ1/SQ2/SQ3 segments of sprint qualifying (the 2023 Sprint
+        Shootout included), e.g. for
+        https://www.formula1db.com/races/2026-chinese-grand-prix
+
+        Same shape as scrape_qualifying(): {"overall": [], "sessions": {1: [...],
+        2: [...], 3: [...]}}, one entry per SQ<N> in the schedule that was not
+        cancelled. The site serves these from /results/sprint-shootout/N in every
+        season. Races without SQ sessions return empty results without loading
+        any page. A listed session with no results table raises.
+        """
+        if race_url is None:
+            race_url = self.race_page
+        race_url = race_url.split("?")[0].split("#")[0].rstrip("/")
+        race_url = re.sub(r"/(entries|results)(/.*)?$", "", race_url)
+        if schedule is None:
+            schedule = self.scrape_schedule(race_url)
+        numbers = sorted(int(s["code"][2:]) for s in schedule if re.fullmatch(r"SQ\d", s["code"]) and not s["cancelled"])
+        sessions = {n: self.__scrape_results_table(f"{race_url}/results/sprint-shootout/{n}") for n in numbers}
+        return {"overall": [], "sessions": sessions}
 
     def __update_next_page(self):
         """Populate self.next_page from the race page currently loaded.

@@ -57,13 +57,12 @@ from curl_cffi import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "sessionresults.db"
+sys.path.insert(0, str(ROOT))
+
+from scrapers import scrape_race_times
 STATS_UPDATER = ROOT / "updaters" / "update_stats_alone.py"
 
 STATSF1 = "https://www.statsf1.com"
-# Same Next.js build id that writedb.py uses for Motorsport Stats. If their build changes, both break together.
-MOTORSPORTSTATS_BUILD = "c2LGT9ym-c6f1pXlf9hjs"
-# writedb.py only asks Motorsport Stats for race times/gaps after the 1981 Argentine Grand Prix (ID 344).
-FIRST_GRAND_PRIX_WITH_API_TIMES = 344
 
 HEADERS = {
     "User-Agent": (
@@ -188,14 +187,6 @@ def tts(t):
     elif len(parts) == 1:
         return quantize(float(parts[0])) if parts[0].replace(".", "", 1).isdigit() else None
     return None
-
-
-def api_time_string(milliseconds):
-    """Motorsport Stats millisecond value -> the 'hh:mm.sss' text writedb.py stores for it."""
-    h = milliseconds // 3600000
-    m = (milliseconds % 3600000) // 60000
-    s = (milliseconds % 60000) / 1000
-    return f"{h:02d}:{m:02d}.{s:03.0f}s"
 
 
 def cell_texts(tr):
@@ -442,30 +433,18 @@ def parse_fastest_laps(soup, rows, updates, prefix):
         new[f"{prefix}fastestlap_lap"] = int(cells[6]) if cells[6].isdigit() else None
 
 
-def apply_api_times(details, rows, updates, prefix):
+def keep_stored_times(rows, updates, prefix):
     """
-    Motorsport Stats gives times and gaps for drivers StatsF1 prints none for (retirements,
-    lapped cars). Only fills columns that are still empty, in writedb.py's text format.
+    StatsF1 prints no time or gap for some drivers (retirements, lapped cars). Where the
+    database already holds one for such a driver, keep it instead of blanking it.
     """
-    time_key, seconds_key = f"{prefix}time", f"{prefix}timeinseconds"
-    gap_key, gap_seconds_key = f"{prefix}gap", f"{prefix}gapinseconds"
-    for driver in details:
-        car_number = int(driver["carNumber"])
-        for row in rows:
-            if row["number"] != car_number or row["substituteorthirddriver"] or row["rowid"] not in updates:
-                continue
-            new = updates[row["rowid"]]
-            if new[time_key] is None:
-                milliseconds = int(driver["time"])
-                if milliseconds == 0:
-                    continue
-                new[time_key] = api_time_string(milliseconds)
-                new[seconds_key] = quantize(milliseconds / 1000)
-            if new[gap_key] is None:
-                milliseconds = int(driver["gap"]["timeToLead"])
-                if milliseconds != 0:
-                    new[gap_key] = api_time_string(milliseconds)
-                    new[gap_seconds_key] = quantize(milliseconds / 1000)
+    for row in rows:
+        new = updates.get(row["rowid"])
+        if not new:
+            continue
+        for key in (f"{prefix}time", f"{prefix}timeinseconds", f"{prefix}gap", f"{prefix}gapinseconds"):
+            if new.get(key) is None:
+                new[key] = row[key]
 
 
 def compute_intervals(rows, updates, position_key, gap_key, interval_key):
@@ -660,23 +639,6 @@ def season_grand_prix_links(season_soup, season):
     if gp_div is None:
         raise ValueError(f"No Grand Prix list found on the StatsF1 {season} season page.")
     return [a["href"] for a in BeautifulSoup(str(gp_div), "html.parser").find_all("a")]
-
-
-def motorsportstats_session_slugs(gp):
-    """The Motorsport Stats race and sprint session slugs for this Grand Prix, found the way writedb.py finds them."""
-    calendar = fetch_json(f"https://motorsportstats.com/_next/data/{MOTORSPORTSTATS_BUILD}/series/fia-formula-one-world-championship/calendar/{gp['season']}.json")
-    events = [
-        event["name"].replace("  ", " ")
-        for event in calendar["pageProps"]["calendar"]["events"]
-        if "season test" not in event["name"].lower() and event.get("status", "").lower() != "cancelled"
-    ]
-    event_slug = unicodedata.normalize("NFKD", events[gp["round"] - 1].replace(" ", "-").lower().replace("'", "-")).encode("ascii", "ignore").decode("ascii")
-    info = fetch_json(f"https://motorsportstats.com/_next/data/{MOTORSPORTSTATS_BUILD}/results/fia-formula-one-world-championship/{gp['season']}/{event_slug}/info.json")
-    # Like writedb.py, only sessions Motorsport Stats says have results: the classification endpoint answers an empty body otherwise.
-    slugs = [session["session"]["slug"] for session in info["pageProps"]["sessions"] if session["hasResults"] and not session["cancelled"]]
-    race = [slug for slug in slugs if slug.endswith("_race")]
-    sprint = [slug for slug in slugs if slug.endswith("_sprint")]
-    return (race[0] if race else None), (sprint[0] if sprint else None)
 
 
 def describe(value):
@@ -1085,18 +1047,16 @@ def main():
         notes["SprintNotes"] = parse_notes(sprint_soup)
         parse_fastest_laps(fetch_html(f"{gp_base}/sprint.aspx?mt"), rows, sprint_updates, prefix="sprint")
 
-    # 3. Times and gaps StatsF1 does not print, from Motorsport Stats
-    if gp["id"] > FIRST_GRAND_PRIX_WITH_API_TIMES:
-        race_slug, sprint_slug = motorsportstats_session_slugs(gp)
-        if race_slug:
-            apply_api_times(fetch_json(f"https://motorsportstats.com/api/results-classification?sessionSlug={race_slug}")["details"], rows, updates, prefix="race")
-        else:
-            print("  Motorsport Stats has no race session for this Grand Prix; retirement times stay as StatsF1 prints them.")
-        if gp["sprint"]:
-            if sprint_slug:
-                apply_api_times(fetch_json(f"https://motorsportstats.com/api/results-classification?sessionSlug={sprint_slug}")["details"], rows, sprint_updates, prefix="sprint")
-            else:
-                print("  Motorsport Stats has no sprint session for this Grand Prix; sprint retirement times stay as StatsF1 prints them.")
+    # 3. Times and gaps StatsF1 does not print: from motorsport.com where it has the race
+    #    (2016 onwards), otherwise keep the ones already stored
+    for session, prefix, session_updates in (("RACE", "race", updates), ("SPR", "sprint", sprint_updates)):
+        if not session_updates:
+            continue
+        if gp["season"] >= scrape_race_times.FIRST_SEASON:
+            targets = [(row["number"], session_updates[row["rowid"]]) for row in rows
+                       if row["rowid"] in session_updates and not row["substituteorthirddriver"]]
+            scrape_race_times.apply_times(scrape_race_times.scrape_classification(gp["season"], gp["name"], session), targets, prefix)
+        keep_stored_times(rows, session_updates, prefix)
 
     compute_intervals(rows, updates, "raceposition", "racegapinseconds", "raceinterval")
     compute_intervals(rows, updates, "fastestlap", "fastestlapgapinseconds", "fastestlapinterval")
